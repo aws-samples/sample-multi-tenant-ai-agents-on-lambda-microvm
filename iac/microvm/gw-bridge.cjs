@@ -102,8 +102,11 @@ http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ reply }));
     } catch (e) {
+      // Log the detail server-side only; never echo exception text to the client
+      // (CodeQL js/stack-trace-exposure).
+      console.error("[bridge] agent turn failed:", e);
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: String(e.message || e) }));
+      res.end(JSON.stringify({ error: "agent turn failed" }));
     }
     return;
   }
