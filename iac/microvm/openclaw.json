@@ -1,0 +1,36 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "custom",
+    "customBindHost": "0.0.0.0",
+    "port": 18789,
+    "auth": { "mode": "token" },
+    "controlUi": { "allowedOrigins": ["*"] }
+  },
+  "models": {
+    "providers": {
+      "amazon-bedrock": {
+        "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "api": "bedrock-converse-stream",
+        "auth": "aws-sdk",
+        "models": [
+          {
+            "id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "name": "Claude Haiku 4.5 (Bedrock)",
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0" },
+      "heartbeat": { "every": "0m" }
+    }
+  },
+  "plugins": { "allow": ["amazon-bedrock"] }
+}
