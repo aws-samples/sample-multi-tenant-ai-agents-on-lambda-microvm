@@ -49,35 +49,7 @@ flip the model, and this project shows how to exploit that for a multi-tenant ag
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    TG[Telegram] -- "webhook /tg/:tenant" --> API["API Gateway · HTTP API"]
-    API --> ORCH["Orchestrator Lambda<br/>router · worker · sweeper"]
-    SWEEP["EventBridge · rate(10 min)"] -.-> ORCH
-    ORCH <-.-> REG[("DynamoDB<br/>tenant registry")]
-    ORCH -- "alive → forward<br/>dead → run-microvm" --> VM
-    subgraph VM ["per-tenant Lambda MicroVM"]
-        direction TB
-        GW["OpenClaw gateway :18789"]
-        BRG["gw-bridge :8090 · warm WebSocket (the perf fix)"]
-        SIDE["sidecar :8080 · health · tenant · chat · hooks"]
-        GW ~~~ BRG ~~~ SIDE
-    end
-    VM -- "NFS /tenants/:id" --> EFS[("EFS · per-tenant state")]
-    VM -- "VPC endpoint" --> BED["Amazon Bedrock"]
-
-    classDef entry   fill:#E3F2FD,stroke:#1565C0,color:#0D47A1;
-    classDef control fill:#FFF3E0,stroke:#E65100,color:#E65100;
-    classDef compute fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20;
-    classDef data    fill:#F3E5F5,stroke:#6A1B9A,color:#4A148C;
-    classDef ext     fill:#ECEFF1,stroke:#455A64,color:#263238;
-
-    class TG,API entry;
-    class ORCH,SWEEP control;
-    class GW,BRG,SIDE compute;
-    class REG,EFS data;
-    class BED ext;
-```
+![Architecture: Telegram webhook enters through API Gateway to the orchestrator Lambda (router · worker · sweeper, with an EventBridge sweep rule and a DynamoDB tenant registry), which forwards to or launches the tenant's Lambda MicroVM (OpenClaw gateway, warm-WebSocket gw-bridge, sidecar); the VM persists state to EFS over NFS and calls Amazon Bedrock through a VPC endpoint.](docs/images/architecture.png)
 
 Credentials reach the VM via its IMDSv2 execution role (no static keys); idle VMs
 suspend and auto-resume, and are reaped within the 8-hour max lifetime — state
