@@ -27,6 +27,8 @@ here the freshly-booted agent introduces itself:
 
 ## Why this project
 
+![Sketchnote comparing the traditional always-on model (agents idle 90% of the time, billed 24/7, DIY lifecycle engineering) with Lambda MicroVMs (one micro-VM per tenant, suspended when idle for ≈$0, resume in seconds, hard isolation by design).](docs/images/value-proposition.jpg)
+
 Self-hosted agents are traditionally "always-on" — a container or VM per user, running
 (and billing) 24/7 even while idle. That doesn't scale to many tenants. Lambda MicroVMs
 flip the model, and this project shows how to exploit that for a multi-tenant agent:
