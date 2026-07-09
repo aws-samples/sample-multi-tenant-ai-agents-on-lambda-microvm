@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -77,6 +78,16 @@ class H(BaseHTTPRequestHandler):
                  "healthzErr": herr, "readyzErr": rerr}).encode())
         elif self.path == "/files":
             self._send(200, state_report())
+        elif self.path.startswith("/progress"):
+            # Proxy to the bridge: poll accumulated stream text for an async turn.
+            try:
+                with urllib.request.urlopen(
+                        "http://127.0.0.1:8090" + self.path, timeout=10) as r:
+                    self._send(200, r.read())
+            except urllib.error.HTTPError as e:
+                self._send(e.code, e.read())
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode())
         elif self.path.startswith("/chat"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             msg = (q.get("m") or ["Say pong"])[0]
@@ -99,6 +110,19 @@ class H(BaseHTTPRequestHandler):
                 sess = d.get("s") or "poc-demo"
                 atts = d.get("attachments") or None
                 self._send(200, agent_turn(msg, sess, atts))
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode())
+        elif self.path == "/chat-async":
+            # Start a turn without blocking; returns {"turnId"} for /progress polling.
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = self.rfile.read(n) or b"{}"
+                json.loads(body)  # validate before proxying
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8090/agent-async", data=body,
+                    headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    self._send(200, r.read())
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode())
         elif self.path == "/tenant":

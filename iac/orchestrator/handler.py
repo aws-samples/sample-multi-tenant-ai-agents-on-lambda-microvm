@@ -103,6 +103,78 @@ def tg_typing(bot_token, chat_id):
         pass
 
 
+def tg_send_placeholder(bot_token, chat_id):
+    """Send the placeholder that streaming edits will grow. Returns message_id or None."""
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": "…"}).encode()
+        with urllib.request.urlopen(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage", data, timeout=20) as r:
+            return json.loads(r.read()).get("result", {}).get("message_id")
+    except Exception as e:
+        print(f"[worker] placeholder send failed: {e}", flush=True)
+        return None
+
+
+def tg_edit(bot_token, chat_id, message_id, text):
+    """Edit a message in place. Telegram rejects edits with unchanged text — skip those."""
+    try:
+        data = urllib.parse.urlencode({
+            "chat_id": chat_id, "message_id": message_id, "text": text[:4000]}).encode()
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{bot_token}/editMessageText", data, timeout=20)
+        return True
+    except Exception as e:
+        print(f"[worker] edit failed: {e}", flush=True)
+        return False
+
+
+def stream_turn_to_telegram(endpoint, token, text, session, attachments,
+                            bot, chat_id):
+    """Pseudo-streaming: async turn + poll /progress, growing one Telegram message.
+
+    Telegram has no true streaming — the standard technique is a placeholder
+    message repeatedly edited via editMessageText (~1 edit/sec/chat allowed;
+    we edit every ~2s). Falls back to the sync path if the async start fails.
+    """
+    st, body = call_vm(endpoint, "/chat-async", token, "POST",
+                       {"m": text, "s": session, "attachments": attachments or []},
+                       timeout=30)
+    turn_id = json.loads(body).get("turnId")
+    if not turn_id:
+        raise RuntimeError("no turnId from /chat-async")
+
+    msg_id = tg_send_placeholder(bot, chat_id)
+    last_len = 0
+    deadline = time.time() + 280
+    reply = None
+    # 1.2s ≈ Telegram's per-chat edit ceiling (~1/s) with headroom; a failed
+    # edit (e.g. 429) leaves last_len unchanged so the next cycle retries.
+    while time.time() < deadline:
+        time.sleep(1.2)
+        try:
+            st, body = call_vm(endpoint, f"/progress?id={turn_id}", token, timeout=15)
+            prog = json.loads(body)
+        except Exception:
+            continue
+        if prog.get("done"):
+            reply = prog.get("reply") or prog.get("text") or "(no reply)"
+            if prog.get("error"):
+                reply = "(agent error — try again)"
+            break
+        cur = prog.get("text") or ""
+        # Grow the placeholder with partial text; "▌" cursor marks in-progress.
+        if msg_id and len(cur) > last_len:
+            if tg_edit(bot, chat_id, msg_id, cur + " ▌"):
+                last_len = len(cur)
+    if reply is None:
+        reply = "(timed out)"
+    if msg_id:
+        tg_edit(bot, chat_id, msg_id, reply)
+    else:
+        tg_send(bot, chat_id, reply)
+    return reply
+
+
 def tg_fetch_image(bot_token, file_id, max_bytes=4_500_000):
     """Download a Telegram file and return (base64, media_type), or (None, None).
 
@@ -252,13 +324,27 @@ def worker(payload):
     # so a cached token from cold-start time is often already expired -> 403.
     token = mint_token(item["microvmId"])
 
-    # run the turn inside the tenant's VM via the sidecar /chat
-    st, body = run_turn(endpoint, token, text, f"tg-{chat_id}", attachments)
-    d = json.loads(body)
-    reply = " ".join(p.get("text", "") for p in
-                     d.get("result", {}).get("payloads", [])) or "(no reply)"
+    session = f"tg-{chat_id}"
     if bot and chat_id:
-        tg_send(bot, chat_id, reply)
+        # Telegram path: pseudo-stream via placeholder + editMessageText.
+        try:
+            reply = stream_turn_to_telegram(
+                endpoint, token, text, session, attachments, bot, chat_id)
+        except Exception as e:
+            # Streaming plumbing failed (old image, bridge restart, ...):
+            # fall back to the sync turn + single send.
+            print(f"[worker] stream path failed ({e}); falling back to sync", flush=True)
+            st, body = run_turn(endpoint, token, text, session, attachments)
+            d = json.loads(body)
+            reply = " ".join(p.get("text", "") for p in
+                             d.get("result", {}).get("payloads", [])) or "(no reply)"
+            tg_send(bot, chat_id, reply)
+    else:
+        # No bot token (chat.sh / HTTP test path): synchronous turn, unchanged.
+        st, body = run_turn(endpoint, token, text, session, attachments)
+        d = json.loads(body)
+        reply = " ".join(p.get("text", "") for p in
+                         d.get("result", {}).get("payloads", [])) or "(no reply)"
     ddb.update_item(Key={"tenantId": tid},
                     UpdateExpression="SET lastActiveAt=:t",
                     ExpressionAttributeValues={":t": now()})

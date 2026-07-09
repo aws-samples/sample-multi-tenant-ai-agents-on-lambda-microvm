@@ -2,7 +2,10 @@
 // runs agent turns over it — eliminating the ~20s per-message CLI spawn cost.
 // Exposes a tiny local HTTP API on 127.0.0.1:8090 that the sidecar calls.
 //
-//   GET /agent?m=<msg>&s=<sessionKey>  -> {"reply": "..."}
+//   GET /agent?m=<msg>&s=<sessionKey>  -> {"reply": "..."}          (sync)
+//   POST /agent {m,s,attachments}      -> {"reply": "..."}          (sync, images)
+//   POST /agent-async {m,s,attachments}-> {"turnId": "..."}         (returns at once)
+//   GET /progress?id=<turnId>          -> {"text","done","reply"?}  (poll for stream)
 //   GET /ready                         -> {"connected": true}
 //
 // Frame protocol (reverse-engineered + verified against gateway 2026.6.11):
@@ -22,6 +25,18 @@ const PORT = 8090;
 let ws = null;
 let connected = false;
 const pending = new Map(); // requestId -> {resolve, reject, timer}
+// Async turns for the poll-based streaming path: turnId -> {text, done, reply, error, at}
+const turns = new Map();
+// Gateway assigns its own runId per run (returned on the ack frame); delta
+// events are keyed by that runId, so map it back to our turnId.
+const runToTurn = new Map();
+const TURN_TTL_MS = 10 * 60 * 1000;
+
+function gcTurns() {
+  const cutoff = Date.now() - TURN_TTL_MS;
+  for (const [id, t] of turns) if (t.at < cutoff) turns.delete(id);
+  for (const [rid, tid] of runToTurn) if (!turns.has(tid)) runToTurn.delete(rid);
+}
 
 function connect() {
   connected = false;
@@ -49,16 +64,37 @@ function connect() {
       else console.error("[bridge] connected to gateway");
       return;
     }
+    // Streaming deltas: the gateway broadcasts "agent" events to operator
+    // clients while a run executes. Assistant-stream events carry accumulated
+    // text and/or the raw delta in payload.data. Events are keyed by the
+    // gateway-assigned runId, which the ack frame maps to our turnId.
+    if (m.type === "event" && m.event === "agent") {
+      const pl = m.payload || {};
+      const tid = pl.runId ? runToTurn.get(pl.runId) : null;
+      const t = tid ? turns.get(tid) : null;
+      if (t && pl.stream === "assistant" && pl.data) {
+        if (typeof pl.data.text === "string" && pl.data.text.length >= t.text.length) {
+          t.text = pl.data.text;
+        } else if (typeof pl.data.delta === "string") {
+          t.text += pl.data.delta;
+        }
+      }
+      return;
+    }
     if (m.type === "res" && pending.has(m.id)) {
       // The agent method emits TWO res frames with the same id, BOTH ok:true:
-      //   1) ack:   payload.status === "accepted"      (no result yet)
+      //   1) ack:   payload.status === "accepted" (+ runId of the spawned run)
       //   2) final: payload.status === "ok" + payload.result.payloads[]
       // Everything of interest is nested under m.payload (not m.result).
       const pl = m.payload || {};
       const result = pl.result;
       const isError = m.ok === false || m.error || pl.status === "error";
       const isFinal = (result && Array.isArray(result.payloads)) || isError;
-      if (!isFinal) return; // ack — keep waiting for the final frame
+      if (!isFinal) {
+        // ack — capture the gateway runId so delta events route to this turn
+        if (pl.runId && turns.has(m.id)) runToTurn.set(pl.runId, m.id);
+        return;
+      }
       const p = pending.get(m.id);
       pending.delete(m.id);
       clearTimeout(p.timer);
@@ -73,10 +109,10 @@ function connect() {
   ws.on("error", (e) => { console.error("[bridge] ws error", e.message); });
 }
 
-function runAgent(message, sessionKey, attachments) {
+function runAgent(message, sessionKey, attachments, turnId) {
   return new Promise((resolve, reject) => {
     if (!connected) return reject(new Error("gateway not connected"));
-    const id = crypto.randomUUID();
+    const id = turnId || crypto.randomUUID();
     const timer = setTimeout(() => {
       pending.delete(id); reject(new Error("agent turn timeout"));
     }, 280000);
@@ -99,11 +135,50 @@ function runAgent(message, sessionKey, attachments) {
   });
 }
 
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  return JSON.parse(Buffer.concat(chunks).toString() || "{}");
+}
+
 http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x");
   if (u.pathname === "/ready") {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ connected }));
+  }
+  if (u.pathname === "/agent-async" && req.method === "POST") {
+    // Fire an agent turn and return immediately; poll /progress for text.
+    let body;
+    try { body = await readJsonBody(req); } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "bad json body" }));
+    }
+    gcTurns();
+    const turnId = crypto.randomUUID();
+    turns.set(turnId, { text: "", done: false, reply: null, error: null, at: Date.now() });
+    runAgent(body.m || "", body.s || "default", body.attachments || null, turnId)
+      .then((reply) => { const t = turns.get(turnId); if (t) { t.done = true; t.reply = reply; } })
+      .catch((e) => {
+        console.error("[bridge] async agent turn failed:", e);
+        const t = turns.get(turnId);
+        if (t) { t.done = true; t.error = "agent turn failed"; }
+      });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ turnId }));
+  }
+  if (u.pathname === "/progress") {
+    const t = turns.get(u.searchParams.get("id") || "");
+    if (!t) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "unknown turn" }));
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({
+      text: t.text, done: t.done,
+      ...(t.reply !== null ? { reply: t.reply } : {}),
+      ...(t.error ? { error: t.error } : {}),
+    }));
   }
   if (u.pathname === "/agent") {
     let msg = u.searchParams.get("m") || "";
