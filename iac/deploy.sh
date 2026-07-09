@@ -49,8 +49,15 @@ else
   TOKEN_NOTE="(from \$GATEWAY_TOKEN)"
 fi
 BUCKET="${STACK}-artifact-${ACCOUNT}-${REGION}"
-IMG_KEY="microvm-images/openclaw.zip"
-CODE_KEY="lambda/orchestrator.zip"
+# S3 keys carry a content hash: CloudFormation only rebuilds the MicroVM image /
+# updates the Lambda when a resource PROPERTY changes, so a fixed key means code
+# changes silently never reach AWS on redeploy. Hash of the inputs fixes that
+# (and makes an unchanged redeploy a true no-op).
+IMG_SRC="Dockerfile openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs materialize-models.mjs"
+IMG_HASH="$(cd "$HERE/microvm" && cat $IMG_SRC | shasum -a 256 | cut -c1-12)"
+IMG_KEY="microvm-images/openclaw-${IMG_HASH}.zip"
+CODE_HASH="$(shasum -a 256 "$HERE/orchestrator/handler.py" | cut -c1-12)"
+CODE_KEY="lambda/orchestrator-${CODE_HASH}.zip"
 
 # ---------- 1. Artifact bucket (the one imperative prerequisite) ----------
 say "1/4 Ensure artifact bucket: $BUCKET"
@@ -66,9 +73,9 @@ if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
 fi
 
 # ---------- 2. MicroVM image artifact (Dockerfile + app) ----------
-say "2/4 Package & upload MicroVM image artifact"
+say "2/4 Package & upload MicroVM image artifact ($IMG_KEY)"
 IMGZIP="$(mktemp -d)/microvm.zip"
-( cd "$HERE/microvm" && zip -j -q "$IMGZIP" Dockerfile openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs )
+( cd "$HERE/microvm" && zip -j -q "$IMGZIP" $IMG_SRC )
 aws s3 cp "$IMGZIP" "s3://${BUCKET}/${IMG_KEY}" --region "$REGION"
 
 # ---------- 3. Orchestrator Lambda zip (boto3 + lambda-microvms model overlay + handler) ----------
@@ -107,6 +114,7 @@ if ! python3 -c "import sys;sys.path.insert(0,'$PKG');import boto3;assert 'lambd
 fi
 cp "$HERE/orchestrator/handler.py" "$PKG/"
 CODEZIP="$(mktemp -d)/orchestrator.zip"; ( cd "$PKG" && zip -q -r "$CODEZIP" . )
+echo "  code key: $CODE_KEY"
 aws s3 cp "$CODEZIP" "s3://${BUCKET}/${CODE_KEY}" --region "$REGION"
 
 # ---------- 4. One CloudFormation deploy: builds image, connector, everything, wired ----------

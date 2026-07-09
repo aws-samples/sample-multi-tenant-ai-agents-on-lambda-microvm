@@ -11,7 +11,10 @@ A working, end-to-end system: run a self-hosted AI agent
 ([OpenClaw](https://github.com/openclaw/openclaw)) **one isolated MicroVM per tenant**,
 with per-tenant state persisted on EFS, model calls served by Amazon Bedrock, and a
 push-based (Telegram webhook) orchestrator that cold-starts, resumes, and reaps tenant
-VMs on demand.
+VMs on demand. Over Telegram the agent **understands images**, **streams its replies**
+(the message grows live as the model generates), and **switches Bedrock models** with
+`/model` — the model catalog is discovered from Bedrock at cold start, so newly
+released models appear without a code change.
 
 Built on [AWS Lambda MicroVMs](https://aws.amazon.com/about-aws/whats-new/2026/06/aws-lambda-microvms/)
 (GA June 2026) — Firecracker-isolated, snapshot-resumable serverless compute with an 8-hour
@@ -47,6 +50,22 @@ flip the model, and this project shows how to exploit that for a multi-tenant ag
 - **Zero static credentials.** The workload gets its AWS access from the MicroVM's IMDSv2
   execution role; no keys are baked into the image or env. The stock SDK/CLI just work.
 
+Beyond the lifecycle story, the Telegram experience covers what users actually expect
+from a chat agent:
+
+- **Vision.** Send a photo (with or without a caption) and the agent looks at it —
+  images flow from Telegram through the orchestrator into the VM as base64 attachments
+  and on to a vision-capable Claude model on Bedrock.
+- **Streaming replies.** Telegram has no native streaming, so the worker sends a
+  placeholder and grows it via `editMessageText` (~1 edit/s, Telegram's ceiling) while
+  the model generates — the reply reads like it's being typed, not delivered as one
+  block after a long wait.
+- **Live model catalog.** `/model` switches the session between Bedrock-hosted Claude
+  models. The catalog (with correct text/image modalities) is discovered from Bedrock's
+  API at each cold start and baked into the agent's config — new models show up on
+  their own, and sessions pinned to a since-retired model self-heal on the next cold
+  start instead of deadlocking.
+
 ## Architecture
 
 ![Architecture: Telegram webhook enters through API Gateway to the orchestrator Lambda (router · worker · sweeper, with an EventBridge sweep rule and a DynamoDB tenant registry), which forwards to or launches the tenant's Lambda MicroVM (OpenClaw gateway, warm-WebSocket gw-bridge, sidecar); the VM persists state to EFS over NFS and calls Amazon Bedrock through a VPC endpoint.](docs/images/architecture.png)
@@ -58,9 +77,9 @@ survives on EFS across VM generations.
 ## Quickstart
 
 Four commands take you from an empty account to a talking agent. You need AWS CLI v2 with
-the `lambda-microvms` subcommands, credentials for a [MicroVMs launch
-region](#requirements--notes), and Bedrock access for Anthropic Claude — full prerequisites and the
-Telegram-push path are in [`iac/README.md`](iac/README.md).
+the `lambda-microvms` subcommands and credentials for a [MicroVMs launch
+region](#requirements--notes) — `deploy.sh` pre-flights both before touching anything.
+Full prerequisites and the Telegram-push path are in [`iac/README.md`](iac/README.md).
 
 ```bash
 cd iac
@@ -89,11 +108,14 @@ cd iac
 
 ## Requirements & notes
 
-- **Region.** Deploy in a MicroVMs launch region — `us-east-1`, `us-east-2`, `us-west-2`,
-  `eu-west-1`, or `ap-northeast-1` — with Bedrock model access for Anthropic Claude enabled.
-- **Security.** `poc-microvm-token-42` and similar strings in the code are **placeholder
-  tokens**, not secrets; the real boundary is IAM + per-request auth tokens. Override
-  `GatewayToken` in the CloudFormation parameters for real use. To report a vulnerability,
+- **Region.** Deploy in a region where Lambda MicroVMs has launched (`us-east-1` was
+  used for verification) — `deploy.sh` probes the target region up front and fails fast
+  with the reason if the service isn't reachable there, so the launch list is never
+  hardcoded.
+- **Security.** `deploy.sh` mints a random per-checkout gateway token on first run
+  (kept in `iac/.gateway-token`, git-ignored, reused across redeploys); the
+  `poc-microvm-token-42` strings remaining in code are inert fallbacks, and the real
+  boundary is IAM + per-request auth tokens either way. To report a vulnerability,
   see [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications).
 - **Maturity.** This is a sample verified live on AWS (June 2026), not production-hardened —
   the open items for hardening are called out in [`docs/`](docs/).

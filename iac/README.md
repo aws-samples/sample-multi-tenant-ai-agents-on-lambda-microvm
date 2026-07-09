@@ -17,9 +17,15 @@ VPC egress connector, which ARE native CFN resources (`AWS::Lambda::MicrovmImage
   connector**, the orchestrator Lambda (env fully wired via `GetAtt` — `IMAGE_ARN`,
   `IMAGE_VERSION`, `EGRESS_CONNECTOR`, no post-deploy patching), API Gateway, EventBridge.
 - `deploy.sh` — the **only** thing CloudFormation can't do is put *bytes* in S3, so the
-  script's imperative part is just: ensure a bucket + upload the two zips (the MicroVM
+  script's imperative core is: ensure a bucket + upload the two zips (the MicroVM
   image artifact and the bundled orchestrator Lambda). Then a single `cloudformation
-  deploy` creates/updates everything.
+  deploy` creates/updates everything. Around that core it also: pre-flights the CLI and
+  target region before anything is created, mints/reuses a random gateway token
+  (`.gateway-token`, git-ignored), hard-verifies the `lambda-microvms` service model
+  made it into the Lambda bundle, and names both S3 keys by **content hash** — a code
+  change always triggers the CFN image rebuild / Lambda update, and an unchanged
+  redeploy is a true no-op (with a fixed key, CFN sees identical resource properties
+  and silently skips the update — code changes never reach AWS).
 
 > The **running MicroVM instances** are still created imperatively at runtime by the
 > orchestrator (`run-microvm` per tenant on demand) — IaC declares the *image* and the
@@ -32,8 +38,10 @@ VPC egress connector, which ARE native CFN resources (`AWS::Lambda::MicrovmImage
   subcommands. Check: `aws lambda-microvms help` and `aws lambda-core help`.
 - **python3 + pip** (to bundle boto3 ≥ 1.43 into the Lambda zip).
 - **zip**, and **curl** (for setWebhook).
-- Credentials for an account in a **MicroVMs launch region** (us-east-1/2, us-west-2,
-  eu-west-1, ap-northeast-1). Bedrock model access for Anthropic Claude enabled.
+- Credentials for an account in a **region where Lambda MicroVMs has launched** —
+  `deploy.sh` probes the target region up front (the launch list keeps growing, so it
+  isn't hardcoded anywhere) and fails fast with the reason if the service isn't
+  reachable there.
 - Docker is **not** required locally — the container build runs on AWS during
   `create-microvm-image`.
 
@@ -78,6 +86,19 @@ back in `X-Telegram-Bot-Api-Secret-Token`.
 # Telegram: just message the bot; the webhook drives the same worker.
 ```
 
+Over Telegram (not the HTTP test path) the worker also gives you:
+
+- **Streaming replies** — a placeholder message that grows via `editMessageText`
+  (~1.2 s cadence, just above Telegram's per-chat edit ceiling) while the model
+  generates, with a `▌` cursor until the final edit.
+- **Images** — send a photo (or an image file) with or without a caption; the worker
+  pulls it from Telegram, ships it into the VM as a base64 attachment, and the agent
+  answers about what it sees.
+- **`/model` switching** — e.g. `/model amazon-bedrock/us.anthropic.claude-sonnet-5`,
+  `/model default` to reset. The catalog is discovered live from Bedrock at each cold
+  start (`materialize-models.mjs`), so newly launched models are switchable without a
+  redeploy.
+
 ## Teardown
 
 ```bash
@@ -94,10 +115,10 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
 | File | Purpose |
 |---|---|
 | `template.yaml` | All declarative infra + IAM |
-| `deploy.sh` | Image build + connector + Lambda code/env wiring |
+| `deploy.sh` | Pre-flight + artifact upload (content-hashed keys) + one CFN deploy |
 | `add-tenant.sh` / `chat.sh` / `teardown.sh` | Lifecycle helpers |
-| `microvm/` | The MicroVM image: Dockerfile, `openclaw.json`, `hooks.py` (sidecar: /health,/tenant,/chat,/files + lifecycle hooks), `efs-monitor.sh` (tenant-aware EFS mount daemon), `gw-bridge.cjs` (persistent WS to the warm gateway — the perf fix), `start.sh` (supervisor) |
-| `orchestrator/handler.py` | Router (fast-ACK) + Worker (ensure-VM, run turn, reply) + Sweeper |
+| `microvm/` | The MicroVM image: Dockerfile, `openclaw.json` (gateway + vision-capable model seed + discovery config), `hooks.py` (sidecar: /health,/tenant,/chat,/chat-async,/progress,/files + lifecycle hooks), `efs-monitor.sh` (tenant-aware EFS mount daemon + config authority + session heal), `materialize-models.mjs` (bakes live Bedrock model discovery into the config at cold start), `gw-bridge.cjs` (persistent WS to the warm gateway; sync turns, async turns with streamed-text polling, image attachments), `start.sh` (supervisor) |
+| `orchestrator/handler.py` | Router (fast-ACK) + Worker (ensure-VM, run turn — streaming edits + images on Telegram) + Sweeper |
 
 ## Design notes / gotchas baked into this IaC (learned the hard way)
 

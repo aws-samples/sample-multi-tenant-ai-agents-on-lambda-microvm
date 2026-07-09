@@ -315,7 +315,11 @@ def worker(payload):
     if not text or not chat_id:
         return {"skipped": "no content/chat"}
 
-    if bot and chat_id:
+    # Telegram chat ids are numeric; chat.sh passes a session string (e.g. "cli")
+    # here. Only numeric ids go down the Telegram send/edit path — otherwise a
+    # Telegram-enabled tenant crashes every chat.sh turn on sendMessage 400.
+    is_tg = bool(bot) and chat_id.lstrip("-").isdigit()
+    if is_tg:
         tg_typing(bot, chat_id)
 
     item, cold = ensure_vm(tid, item)
@@ -325,7 +329,7 @@ def worker(payload):
     token = mint_token(item["microvmId"])
 
     session = f"tg-{chat_id}"
-    if bot and chat_id:
+    if is_tg:
         # Telegram path: pseudo-stream via placeholder + editMessageText.
         try:
             reply = stream_turn_to_telegram(
