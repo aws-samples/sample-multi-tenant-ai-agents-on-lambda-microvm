@@ -42,6 +42,12 @@ while true; do
       # that lacks the meta stamp (missing-meta-vs-last-good), undoing the overwrite.
       cp /opt/poc/openclaw.json "$TDIR/openclaw.json"
       rm -f "$TDIR/openclaw.json.last-good" "$TDIR/openclaw.json.bak"
+      # Materialize live Bedrock model discovery into the config (~1.3-3.3s once
+      # per cold start). The gateway's image guard and models list only read the
+      # explicit models array, never the plugin's live catalog — so we bake the
+      # discovered catalog (with correct text+image modalities) in here. On any
+      # failure the static seed list shipped in the image stays as fallback.
+      node /opt/poc/materialize-models.mjs "$TDIR/openclaw.json" || true
       # Plugins must be root-owned or the gateway blocks them (see Dockerfile note);
       # fix up trees seeded by older generations.
       [ -d "$TDIR/npm" ] && chown -R root:root "$TDIR/npm" 2>/dev/null

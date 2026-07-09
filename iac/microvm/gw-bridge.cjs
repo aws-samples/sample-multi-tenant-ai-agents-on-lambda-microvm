@@ -73,7 +73,7 @@ function connect() {
   ws.on("error", (e) => { console.error("[bridge] ws error", e.message); });
 }
 
-function runAgent(message, sessionKey) {
+function runAgent(message, sessionKey, attachments) {
   return new Promise((resolve, reject) => {
     if (!connected) return reject(new Error("gateway not connected"));
     const id = crypto.randomUUID();
@@ -81,9 +81,20 @@ function runAgent(message, sessionKey) {
       pending.delete(id); reject(new Error("agent turn timeout"));
     }, 280000);
     pending.set(id, { resolve, reject, timer });
+    // Attachment wire format matches the gateway's own subagent-spawn caller:
+    // [{type:"image", source:{type:"base64", media_type, data}}]
+    const gwAttachments = (attachments || [])
+      .filter((a) => a && a.data && a.media_type)
+      .map((a) => ({
+        type: "image",
+        source: { type: "base64", media_type: a.media_type, data: a.data },
+      }));
     ws.send(JSON.stringify({
       type: "req", id, method: "agent",
-      params: { message, sessionKey, idempotencyKey: id },
+      params: {
+        message, sessionKey, idempotencyKey: id,
+        ...(gwAttachments.length ? { attachments: gwAttachments } : {}),
+      },
     }));
   });
 }
@@ -95,10 +106,25 @@ http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ connected }));
   }
   if (u.pathname === "/agent") {
-    const msg = u.searchParams.get("m") || "";
-    const sess = u.searchParams.get("s") || "default";
+    let msg = u.searchParams.get("m") || "";
+    let sess = u.searchParams.get("s") || "default";
+    let attachments = null;
+    if (req.method === "POST") {
+      // JSON body variant for image turns (base64 too big for a query string).
+      try {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+        msg = body.m || msg;
+        sess = body.s || sess;
+        attachments = body.attachments || null;
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "bad json body" }));
+      }
+    }
     try {
-      const reply = await runAgent(msg, sess);
+      const reply = await runAgent(msg, sess, attachments);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ reply }));
     } catch (e) {

@@ -13,16 +13,26 @@ TENANT_FILE = "/var/run/tenant-id"
 MARKER = "/var/run/efs-mounted"
 
 
-def agent_turn(message: str, session: str, deliver_channel: str = None, reply_to: str = None) -> bytes:
+def agent_turn(message: str, session: str, attachments=None) -> bytes:
     """Run one agent turn via the PERSISTENT gateway bridge (no per-message CLI spawn).
 
     The bridge holds a warm WebSocket to the gateway; a turn is ~2s instead of ~22s.
+    Image attachments (base64) POST to the bridge; text-only turns keep the GET path.
     Returns the same JSON shape callers expect: {"result":{"payloads":[{"text":...}]}}.
     """
-    url = ("http://127.0.0.1:8090/agent?m=" + urllib.parse.quote(message)
-           + "&s=" + urllib.parse.quote(session))
-    with urllib.request.urlopen(url, timeout=290) as r:
-        d = json.loads(r.read())
+    if attachments:
+        req = urllib.request.Request(
+            "http://127.0.0.1:8090/agent",
+            data=json.dumps({"m": message, "s": session,
+                             "attachments": attachments}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=290) as r:
+            d = json.loads(r.read())
+    else:
+        url = ("http://127.0.0.1:8090/agent?m=" + urllib.parse.quote(message)
+               + "&s=" + urllib.parse.quote(session))
+        with urllib.request.urlopen(url, timeout=290) as r:
+            d = json.loads(r.read())
     if "error" in d:
         return json.dumps({"error": d["error"]}).encode()
     return json.dumps({"result": {"payloads": [{"text": d.get("reply", "")}]}}).encode()
@@ -72,14 +82,26 @@ class H(BaseHTTPRequestHandler):
             msg = (q.get("m") or ["Say pong"])[0]
             sess = (q.get("s") or ["poc-demo"])[0]
             try:
-                self._send(200, agent_turn(msg, sess))
+                self._send(200, agent_turn(msg, sess, None))
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode())
         else:
             self._send(404)
 
     def do_POST(self):
-        if self.path == "/tenant":
+        if self.path == "/chat":
+            # JSON body variant of GET /chat — used for turns with image attachments
+            # (base64 payloads don't fit in a query string).
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                d = json.loads(self.rfile.read(n) or b"{}")
+                msg = d.get("m") or "Say pong"
+                sess = d.get("s") or "poc-demo"
+                atts = d.get("attachments") or None
+                self._send(200, agent_turn(msg, sess, atts))
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode())
+        elif self.path == "/tenant":
             # Orchestrator assigns the tenant; unblocks efs-monitor.
             n = int(self.headers.get("Content-Length") or 0)
             tid = json.loads(self.rfile.read(n) or b"{}").get("tenantId", "")
