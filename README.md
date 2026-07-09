@@ -39,6 +39,9 @@ flip the model, and this project shows how to exploit that for a multi-tenant ag
 - **Near-zero idle cost.** An idle tenant's VM auto-suspends; a fully idle tenant is
   terminated and its state parks on EFS for ≈$0. You pay for conversation, not for
   waiting — the economic foundation that makes one-VM-per-tenant affordable at scale.
+  (The stack itself keeps one always-on NAT gateway for the agent's web access,
+  ~$32/month — per-stack, not per-tenant; drop it if your agents don't need the
+  internet.)
 - **Fast resume, not cold boot.** Resuming a suspended MicroVM restores the Firecracker
   snapshot — process memory and all — in ~seconds, so a returning user hits a warm agent
   (bundle loaded, provider pre-warmed) instead of waiting for a container to boot.
@@ -65,6 +68,10 @@ from a chat agent:
   API at each cold start and baked into the agent's config — new models show up on
   their own, and sessions pinned to a since-retired model self-heal on the next cold
   start instead of deadlocking.
+- **Web access.** The agent's built-in `web_search` / `web_fetch` tools work: the VM
+  subnet routes internet-bound traffic through a NAT gateway (search uses the key-free
+  DuckDuckGo provider), while Bedrock and EFS traffic still take their private
+  VPC-endpoint / mount-target paths.
 
 ## Architecture
 

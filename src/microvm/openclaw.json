@@ -64,6 +64,12 @@
       "heartbeat": { "every": "0m" }
     }
   },
+  "tools": {
+    "web": {
+      "search": { "enabled": true, "provider": "duckduckgo" },
+      "fetch": { "enabled": true }
+    }
+  },
   "plugins": {
     "allow": ["amazon-bedrock"],
     "entries": {

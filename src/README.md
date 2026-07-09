@@ -132,7 +132,9 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
    marker on first GET), and bounds every mount with `timeout`.
 4. **Only one egress connector per MicroVM** → choosing VPC egress removes the default
    internet path, so Bedrock must be reached via the **VPC endpoint** (in `template.yaml`).
-   IMDS exec-role creds are link-local and unaffected.
+   IMDS exec-role creds are link-local and unaffected. The VM subnet additionally routes
+   `0.0.0.0/0` through a **NAT gateway** so the agent's web search/fetch tools work —
+   Bedrock and EFS traffic still take the private paths, bypassing the NAT.
 5. **Network-connector operator role trust must be plain `lambda.amazonaws.com`** — an
    `aws:SourceAccount` condition makes the connector service fail to assume it.
 6. **`update-microvm-image` replaces, not merges** — deploy.sh always re-sends base image,
