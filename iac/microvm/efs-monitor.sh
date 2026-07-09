@@ -36,6 +36,39 @@ while true; do
       else
         echo "[efs-monitor] tenant $TENANT has prior state - adopting it"
       fi
+      # Config is image-owned; only agent state persists across generations. Without
+      # this, a stale EFS openclaw.json shadows every config change shipped in the image.
+      # Also drop OpenClaw's backups: its watchdog restores .last-good over any config
+      # that lacks the meta stamp (missing-meta-vs-last-good), undoing the overwrite.
+      cp /opt/poc/openclaw.json "$TDIR/openclaw.json"
+      rm -f "$TDIR/openclaw.json.last-good" "$TDIR/openclaw.json.bak"
+      # Plugins must be root-owned or the gateway blocks them (see Dockerfile note);
+      # fix up trees seeded by older generations.
+      [ -d "$TDIR/npm" ] && chown -R root:root "$TDIR/npm" 2>/dev/null
+      # Clear per-session /model pins on cold start. A pin to a since-retired Bedrock
+      # model fails every turn INCLUDING the /model command that would clear it,
+      # permanently deadlocking the session. Cold start (reap -> relaunch) is the safe
+      # reset point: the gateway isn't running against this dir yet. Pins still
+      # survive suspend/resume; they only reset when the tenant went fully cold.
+      python3 - "$TDIR/agents/main/sessions/sessions.json" <<'HEAL' 2>/dev/null || true
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(0)
+changed = False
+for k, e in d.items():
+    if not isinstance(e, dict) or not e.get("modelOverride"):
+        continue
+    print(f"[efs-monitor] clearing model pin on {k}: {e['modelOverride']}")
+    for f in ("providerOverride", "modelOverride", "modelOverrideSource",
+              "model", "modelProvider"):
+        e.pop(f, None)
+    changed = True
+if changed:
+    json.dump(d, open(p, "w"), indent=1)
+HEAL
       mount --bind "$TDIR" "$STATE_DIR"
       touch "$MARKER"
       echo "[efs-monitor] state dir now EFS-backed for tenant $TENANT; bouncing gateway"

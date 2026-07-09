@@ -103,6 +103,18 @@ Resources:
       SubnetIds: [!Ref Subnet]
       SecurityGroupIds: [!Ref VpcSg]
 
+  # Bedrock control-plane endpoint: the provider plugin's model discovery calls
+  # ListFoundationModels/ListInferenceProfiles on bedrock.<region> (not -runtime).
+  BedrockControlVpce:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref Subnet]
+      SecurityGroupIds: [!Ref VpcSg]
+
   # ---------- EFS: per-tenant state lives under /tenants/<id> on this filesystem ----------
   Efs:
     Type: AWS::EFS::FileSystem

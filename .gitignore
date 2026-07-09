@@ -19,6 +19,11 @@ __pycache__/
 secrets.*
 iac/.gateway-token
 
+# local Claude Code / skills-CLI artifacts (session tooling, not part of the project)
+.agents/
+.claude/
+skills-lock.json
+
 # kept locally but excluded from the repo (intermediate iterations + raw verification logs)
 prototypes/
 docs/results/
