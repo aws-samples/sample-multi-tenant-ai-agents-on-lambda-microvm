@@ -17,6 +17,7 @@ __pycache__/
 # never commit real secrets or per-account state
 *.env
 secrets.*
+iac/.gateway-token
 
 # kept locally but excluded from the repo (intermediate iterations + raw verification logs)
 prototypes/

@@ -4,8 +4,19 @@
 # handy for validating cold starts (~90s) from a terminal.
 # Usage: ./chat.sh STACK REGION TENANT_ID "message" [sessionKey]
 set -euo pipefail
-STACK="${1:?stack}"; REGION="${2:?region}"; TID="${3:?tenantId}"; MSG="${4:?message}"; SESS="${5:-cli}"
+if [ $# -lt 4 ]; then
+  echo "usage: $0 STACK REGION TENANT_ID \"message\" [sessionKey]" >&2; exit 1
+fi
+STACK="$1"; REGION="$2"; TID="$3"; MSG="$4"; SESS="${5:-cli}"
 FN="${STACK}-orchestrator"
+
+# Heads-up before the blocking invoke: a cold tenant means a ~90s MicroVM cold start,
+# which would otherwise look like a silent hang.
+STATE="$(aws dynamodb get-item --region "$REGION" --table-name "${STACK}-tenants" \
+  --key "{\"tenantId\":{\"S\":\"$TID\"}}" --query 'Item.state.S' --output text 2>/dev/null || true)"
+if [ "$STATE" != "RUNNING" ]; then
+  echo "Tenant is cold — starting MicroVM, first turn takes ~90s ..."
+fi
 PAYLOAD="$(python3 -c 'import json,sys; print(json.dumps({"_worker":{"tenantId":sys.argv[1],"update":{"message":{"chat":{"id":sys.argv[2]},"text":sys.argv[3]}}}}))' "$TID" "$SESS" "$MSG")"
 OUT="$(mktemp)"
 aws lambda invoke --region "$REGION" --function-name "$FN" \

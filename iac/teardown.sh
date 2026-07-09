@@ -6,7 +6,10 @@
 # then (c) empty & drop the artifact bucket (also not stack-managed).
 # Usage: ./teardown.sh STACK REGION
 set -uo pipefail
-STACK="${1:?stack}"; REGION="${2:?region}"
+if [ $# -lt 2 ]; then
+  echo "usage: $0 STACK REGION" >&2; exit 1
+fi
+STACK="$1"; REGION="$2"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="${STACK}-artifact-${ACCOUNT}-${REGION}"
 say(){ printf '\n== %s ==\n' "$*"; }

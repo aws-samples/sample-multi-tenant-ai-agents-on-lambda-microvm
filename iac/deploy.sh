@@ -17,13 +17,40 @@ set -euo pipefail
 STACK="${1:-openclaw-mt}"
 REGION="${2:-us-east-1}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+say(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
+
+# ---------- 0. Pre-flight (fail fast, before anything is created) ----------
+say "0/4 Pre-flight checks"
+if ! aws lambda-microvms help >/dev/null 2>&1; then
+  echo "ERROR: this AWS CLI has no 'lambda-microvms' subcommands (needs AWS CLI v2 >= 2.35)."
+  echo "       installed: $(aws --version 2>&1)"
+  exit 1
+fi
+# Cheap read against the target region: catches not-yet-launched regions (the launch
+# list keeps growing — probe instead of hardcoding it) and missing credentials.
+if ! ERR="$(aws lambda-microvms list-microvms --region "$REGION" 2>&1 >/dev/null)"; then
+  echo "ERROR: Lambda MicroVMs isn't reachable in region '$REGION':"
+  printf '       %s\n' "$ERR"
+  echo "       If the service hasn't launched in '$REGION' yet, use a launch region and re-run."
+  exit 1
+fi
+echo "  aws cli ok; region '$REGION' ok"
+
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-GATEWAY_TOKEN="${GATEWAY_TOKEN:-poc-microvm-token-42}"
+# Gateway token: explicit $GATEWAY_TOKEN wins; otherwise reuse iac/.gateway-token, minting
+# it once per checkout (random) so redeploys are idempotent and no shared default ships.
+TOKEN_FILE="$HERE/.gateway-token"
+if [ -z "${GATEWAY_TOKEN:-}" ]; then
+  [ -f "$TOKEN_FILE" ] || openssl rand -hex 16 > "$TOKEN_FILE"
+  GATEWAY_TOKEN="$(cat "$TOKEN_FILE")"
+  TOKEN_NOTE="(kept in ${TOKEN_FILE#$HERE/}; redeploys reuse it)"
+else
+  TOKEN_NOTE="(from \$GATEWAY_TOKEN)"
+fi
 BUCKET="${STACK}-artifact-${ACCOUNT}-${REGION}"
 IMG_KEY="microvm-images/openclaw.zip"
 CODE_KEY="lambda/orchestrator.zip"
-
-say(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 
 # ---------- 1. Artifact bucket (the one imperative prerequisite) ----------
 say "1/4 Ensure artifact bucket: $BUCKET"
@@ -68,7 +95,16 @@ if [ -n "$CLI_DATA" ] && [ -d "$PKG/botocore/data" ]; then
   cp -R "$CLI_DATA/lambda-microvms" "$PKG/botocore/data/" 2>/dev/null || true
   cp -R "$CLI_DATA/lambda-core"     "$PKG/botocore/data/" 2>/dev/null || true
 fi
-python3 -c "import sys;sys.path.insert(0,'$PKG');import boto3;assert 'lambda-microvms' in boto3.session.Session().get_available_services(),'overlay failed';print('  boto3',boto3.__version__,'+ lambda-microvms model')"
+# Hard gate: the bundle MUST contain the model, or the orchestrator only fails at invoke
+# time with an unrelated-looking UnknownServiceError. Fail the deploy here instead.
+if ! python3 -c "import sys;sys.path.insert(0,'$PKG');import boto3;assert 'lambda-microvms' in boto3.session.Session().get_available_services();print('  boto3',boto3.__version__,'+ lambda-microvms model')" 2>/dev/null; then
+  echo "ERROR: couldn't get the 'lambda-microvms' service model into the Lambda bundle."
+  echo "       Bundled boto3 lacks it, and extracting it from the local AWS CLI failed"
+  echo "       (CLI data dir found: '${CLI_DATA:-none}')."
+  echo "       Fix: install AWS CLI v2 >= 2.35 via the official installer, or upgrade"
+  echo "       boto3 on PyPI to a version that ships the lambda-microvms model."
+  exit 1
+fi
 cp "$HERE/orchestrator/handler.py" "$PKG/"
 CODEZIP="$(mktemp -d)/orchestrator.zip"; ( cd "$PKG" && zip -q -r "$CODEZIP" . )
 aws s3 cp "$CODEZIP" "s3://${BUCKET}/${CODE_KEY}" --region "$REGION"
@@ -92,6 +128,7 @@ say "DONE"
 cat <<EOF
 
   API endpoint : ${API}
+  Gateway token: ${GATEWAY_TOKEN}  ${TOKEN_NOTE}
   Add a tenant : ./add-tenant.sh ${STACK} ${REGION} <tenantId> [telegramBotToken] [webhookSecret]
   Test (HTTP)  : ./chat.sh ${STACK} ${REGION} <tenantId> "your message"
   Teardown     : ./teardown.sh ${STACK} ${REGION}

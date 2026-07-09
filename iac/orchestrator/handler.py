@@ -29,7 +29,6 @@ IMAGE_VERSION = os.environ["IMAGE_VERSION"]
 EXEC_ROLE_ARN = os.environ["EXEC_ROLE_ARN"]
 INGRESS = os.environ["INGRESS_CONNECTOR"]
 EGRESS = os.environ["EGRESS_CONNECTOR"]
-GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "poc-microvm-token-42")
 IDLE_REAP_SECONDS = int(os.environ.get("IDLE_REAP_SECONDS", "3600"))
 
 mv = boto3.client("lambda-microvms", region_name=REGION)
@@ -65,9 +64,11 @@ def call_vm(endpoint, path, token, method="GET", body=None, port=8080, timeout=2
 
 
 def mint_token(microvm_id):
+    # Only the sidecar (8080) is reachable through the proxy; the OpenClaw gateway
+    # (18789) stays loopback-only inside the VM.
     r = mv.create_microvm_auth_token(
         microvmIdentifier=microvm_id, expirationInMinutes=55,
-        allowedPorts=[{"port": 8080}, {"port": 18789}])
+        allowedPorts=[{"port": 8080}])
     return r["authToken"]["X-aws-proxy-auth"]
 
 
