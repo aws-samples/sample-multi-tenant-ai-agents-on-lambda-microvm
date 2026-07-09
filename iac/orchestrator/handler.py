@@ -55,12 +55,24 @@ def mv_state(microvm_id):
 def call_vm(endpoint, path, token, method="GET", body=None, port=8080, timeout=280):
     url = f"https://{endpoint}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"X-aws-proxy-auth": token,
-                                          "X-aws-proxy-port": str(port),
-                                          "Content-Type": "application/json"})
+    headers = {"X-aws-proxy-auth": token,
+               "X-aws-proxy-port": str(port),
+               "Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read()
+
+
+def run_turn(endpoint, token, text, session, attachments=None):
+    """One agent turn via the sidecar. Images go as a POST body (too big for a URL)."""
+    if attachments:
+        st, body = call_vm(endpoint, "/chat", token, "POST",
+                           {"m": text, "s": session, "attachments": attachments},
+                           timeout=280)
+    else:
+        qs = urllib.parse.urlencode({"m": text, "s": session})
+        st, body = call_vm(endpoint, f"/chat?{qs}", token, timeout=280)
+    return st, body
 
 
 def mint_token(microvm_id):
@@ -89,6 +101,57 @@ def tg_typing(bot_token, chat_id):
             f"https://api.telegram.org/bot{bot_token}/sendChatAction", data, timeout=10)
     except Exception:
         pass
+
+
+def tg_fetch_image(bot_token, file_id, max_bytes=4_500_000):
+    """Download a Telegram file and return (base64, media_type), or (None, None).
+
+    Caps at ~4.5MB — Bedrock's per-image limit is 5MB and Telegram photos
+    (recompressed JPEG) are far smaller; the cap only bites on image documents.
+    """
+    import base64
+    import mimetypes
+    try:
+        with urllib.request.urlopen(
+                f"https://api.telegram.org/bot{bot_token}/getFile?file_id="
+                + urllib.parse.quote(file_id), timeout=20) as r:
+            path = json.loads(r.read())["result"]["file_path"]
+        with urllib.request.urlopen(
+                f"https://api.telegram.org/file/bot{bot_token}/{path}", timeout=60) as r:
+            data = r.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            print(f"[worker] image too large ({len(data)}B), skipped", flush=True)
+            return None, None
+        media_type = mimetypes.guess_type(path)[0] or "image/jpeg"
+        return base64.b64encode(data).decode(), media_type
+    except Exception as e:
+        print(f"[worker] tg_fetch_image failed: {e}", flush=True)
+        return None, None
+
+
+def extract_content(msg, bot):
+    """Pull text + image attachments out of a Telegram message.
+
+    Photos live in msg.photo[] (sizes ascending; last is largest) with the
+    user's text in msg.caption — there is NO msg.text on media messages.
+    Image documents (sent as files) come via msg.document with an image/* mime.
+    """
+    text = msg.get("text", "") or msg.get("caption", "")
+    attachments = []
+    if bot:
+        photos = msg.get("photo") or []
+        if photos:
+            b64, mt = tg_fetch_image(bot, photos[-1]["file_id"])
+            if b64:
+                attachments.append({"media_type": mt, "data": b64})
+        doc = msg.get("document") or {}
+        if (doc.get("mime_type") or "").startswith("image/"):
+            b64, _ = tg_fetch_image(bot, doc["file_id"])
+            if b64:
+                attachments.append({"media_type": doc["mime_type"], "data": b64})
+    if attachments and not text:
+        text = "(the user sent this image with no caption — look at it and respond)"
+    return text, attachments
 
 
 # ---------- cold start (single-writer lock via conditional update) ----------
@@ -174,10 +237,11 @@ def worker(payload):
     update = payload["update"]
     item = get_tenant(tid)
     bot = item.get("botToken")
-    chat_id = str(((update.get("message") or {}).get("chat") or {}).get("id", ""))
-    text = (update.get("message") or {}).get("text", "")
+    msg = update.get("message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id", ""))
+    text, attachments = extract_content(msg, bot)
     if not text or not chat_id:
-        return {"skipped": "no text/chat"}
+        return {"skipped": "no content/chat"}
 
     if bot and chat_id:
         tg_typing(bot, chat_id)
@@ -189,8 +253,7 @@ def worker(payload):
     token = mint_token(item["microvmId"])
 
     # run the turn inside the tenant's VM via the sidecar /chat
-    qs = urllib.parse.urlencode({"m": text, "s": f"tg-{chat_id}"})
-    st, body = call_vm(endpoint, f"/chat?{qs}", token, timeout=280)
+    st, body = run_turn(endpoint, token, text, f"tg-{chat_id}", attachments)
     d = json.loads(body)
     reply = " ".join(p.get("text", "") for p in
                      d.get("result", {}).get("payloads", [])) or "(no reply)"

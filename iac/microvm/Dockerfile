@@ -6,7 +6,7 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends nfs-common \
     && rm -rf /var/lib/apt/lists/*
 
-COPY openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs /opt/poc/
+COPY openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs materialize-models.mjs /opt/poc/
 RUN chmod +x /opt/poc/start.sh /opt/poc/efs-monitor.sh \
     && mkdir -p /home/node/.openclaw /mnt/efs \
     && cp /opt/poc/openclaw.json /home/node/.openclaw/openclaw.json \
