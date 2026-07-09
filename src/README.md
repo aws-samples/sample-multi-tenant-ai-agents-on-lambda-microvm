@@ -48,7 +48,7 @@ VPC egress connector, which ARE native CFN resources (`AWS::Lambda::MicrovmImage
 ## Deploy (one command)
 
 ```bash
-cd iac
+cd src
 ./deploy.sh <stack-name> <region>        # e.g. ./deploy.sh openclaw-mt us-east-1
 ```
 

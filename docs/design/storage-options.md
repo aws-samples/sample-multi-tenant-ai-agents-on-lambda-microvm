@@ -22,7 +22,7 @@ boundary, not a *state* boundary.
 **Decision:** EFS, mounted at runtime, bind-mounted over the agent's data dir. It's the only
 option giving full POSIX semantics (which the append-only session log requires) plus
 survival across instance generations. The VPC-endpoint tax that comes with it is documented
-as gotcha #2 in the deployment notes ([`../../iac/README.md`](../../iac/README.md)).
+as gotcha #2 in the deployment notes ([`../../src/README.md`](../../src/README.md)).
 
 ## Production hardening (open items, not needed for the PoC)
 

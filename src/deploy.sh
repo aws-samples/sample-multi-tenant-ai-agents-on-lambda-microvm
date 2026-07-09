@@ -38,7 +38,7 @@ fi
 echo "  aws cli ok; region '$REGION' ok"
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-# Gateway token: explicit $GATEWAY_TOKEN wins; otherwise reuse iac/.gateway-token, minting
+# Gateway token: explicit $GATEWAY_TOKEN wins; otherwise reuse src/.gateway-token, minting
 # it once per checkout (random) so redeploys are idempotent and no shared default ships.
 TOKEN_FILE="$HERE/.gateway-token"
 if [ -z "${GATEWAY_TOKEN:-}" ]; then

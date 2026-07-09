@@ -79,10 +79,10 @@ survives on EFS across VM generations.
 Four commands take you from an empty account to a talking agent. You need AWS CLI v2 with
 the `lambda-microvms` subcommands and credentials for a [MicroVMs launch
 region](#requirements--notes) — `deploy.sh` pre-flights both before touching anything.
-Full prerequisites and the Telegram-push path are in [`iac/README.md`](iac/README.md).
+Full prerequisites and the Telegram-push path are in [`src/README.md`](src/README.md).
 
 ```bash
-cd iac
+cd src
 
 # 1. Deploy the whole system (~10 min: CloudFormation + MicroVM image build + connector).
 ./deploy.sh openclaw-mt us-east-1
@@ -103,7 +103,7 @@ cd iac
 
 | Directory | What it is | Details |
 |---|---|---|
-| [`iac/`](iac/) | **Start here.** Reproduce the whole system from zero — CloudFormation template, one-command deploy, tenant/lifecycle scripts, the MicroVM image, the orchestrator. | [`iac/README.md`](iac/README.md) — prerequisites, step-by-step deploy/test/teardown, gotchas |
+| [`src/`](src/) | **Start here.** Reproduce the whole system from zero — CloudFormation template, one-command deploy, tenant/lifecycle scripts, the MicroVM image, the orchestrator. | [`src/README.md`](src/README.md) — prerequisites, step-by-step deploy/test/teardown, gotchas |
 | [`docs/`](docs/) | The "why" behind the code: the design decisions taken while building. | [`docs/README.md`](docs/README.md) — index of the design notes |
 
 ## Requirements & notes
@@ -113,7 +113,7 @@ cd iac
   with the reason if the service isn't reachable there, so the launch list is never
   hardcoded.
 - **Security.** `deploy.sh` mints a random per-checkout gateway token on first run
-  (kept in `iac/.gateway-token`, git-ignored, reused across redeploys); the
+  (kept in `src/.gateway-token`, git-ignored, reused across redeploys); the
   `poc-microvm-token-42` strings remaining in code are inert fallbacks, and the real
   boundary is IAM + per-request auth tokens either way. To report a vulnerability,
   see [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications).

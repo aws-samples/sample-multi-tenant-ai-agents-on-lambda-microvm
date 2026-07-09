@@ -17,7 +17,7 @@ __pycache__/
 # never commit real secrets or per-account state
 *.env
 secrets.*
-iac/.gateway-token
+src/.gateway-token
 
 # local Claude Code / skills-CLI artifacts (session tooling, not part of the project)
 .agents/
