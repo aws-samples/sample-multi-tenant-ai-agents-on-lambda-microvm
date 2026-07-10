@@ -63,6 +63,9 @@ from a chat agent:
   placeholder and grows it via `editMessageText` (~1 edit/s, Telegram's ceiling) while
   the model generates — the reply reads like it's being typed, not delivered as one
   block after a long wait.
+- **Long turns.** A turn that outlives the polling Lambda invocation (15 min hard max)
+  is relayed to a chained self-invoke, so a single turn is bounded only by the VM's
+  8h lifetime — not by any Lambda or API Gateway timeout.
 - **Live model catalog.** `/model` switches the session between Bedrock-hosted Claude
   models. The catalog (with correct text/image modalities) is discovered from Bedrock's
   API at each cold start and baked into the agent's config — new models show up on

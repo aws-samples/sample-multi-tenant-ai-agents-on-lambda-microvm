@@ -144,6 +144,11 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
 8. **SCP may block public Lambda Function URLs** — that's why ingress is API Gateway.
 9. **Performance:** the sidecar talks to the *persistent* gateway over a warm WebSocket
    (`gw-bridge.cjs`) instead of spawning a CLI per message — turns dropped from ~22s to ~2s.
+10. **A turn can outlive the Lambda invocation polling it** (300s timeout, 15 min hard
+    max) — the turn keeps running inside the VM, but its reply would never be delivered.
+    Fix: just before timing out, the worker hands polling to a fresh async self-invoke
+    (turnId + message state), so a single turn is bounded by the VM's 8h lifetime, not
+    by Lambda's 15 min.
 
 Each of these was hit and fixed during live verification; the reasoning is captured in
 [`../docs/design/`](../docs/design/).

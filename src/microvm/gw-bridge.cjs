@@ -31,7 +31,13 @@ const turns = new Map();
 // events are keyed by that runId, so map it back to our turnId.
 const runToTurn = new Map();
 const TURN_TTL_MS = 10 * 60 * 1000;
+// Async turns may legitimately run for hours (the Lambda pollers chain across
+// invocations); the VM's 8h max lifetime is the real bound, not a poll timeout.
+const ASYNC_TURN_TIMEOUT_MS = 8 * 60 * 60 * 1000;
 
+// GC: drop turns 10 min after their last activity (progress poll or completion).
+// An in-flight turn being polled keeps refreshing its timestamp, so only turns
+// abandoned by every poller age out.
 function gcTurns() {
   const cutoff = Date.now() - TURN_TTL_MS;
   for (const [id, t] of turns) if (t.at < cutoff) turns.delete(id);
@@ -109,13 +115,13 @@ function connect() {
   ws.on("error", (e) => { console.error("[bridge] ws error", e.message); });
 }
 
-function runAgent(message, sessionKey, attachments, turnId) {
+function runAgent(message, sessionKey, attachments, turnId, timeoutMs) {
   return new Promise((resolve, reject) => {
     if (!connected) return reject(new Error("gateway not connected"));
     const id = turnId || crypto.randomUUID();
     const timer = setTimeout(() => {
       pending.delete(id); reject(new Error("agent turn timeout"));
-    }, 280000);
+    }, timeoutMs || 280000);
     pending.set(id, { resolve, reject, timer });
     // Attachment wire format matches the gateway's own subagent-spawn caller:
     // [{type:"image", source:{type:"base64", media_type, data}}]
@@ -157,12 +163,16 @@ http.createServer(async (req, res) => {
     gcTurns();
     const turnId = crypto.randomUUID();
     turns.set(turnId, { text: "", done: false, reply: null, error: null, at: Date.now() });
-    runAgent(body.m || "", body.s || "default", body.attachments || null, turnId)
-      .then((reply) => { const t = turns.get(turnId); if (t) { t.done = true; t.reply = reply; } })
+    runAgent(body.m || "", body.s || "default", body.attachments || null, turnId,
+             ASYNC_TURN_TIMEOUT_MS)
+      .then((reply) => {
+        const t = turns.get(turnId);
+        if (t) { t.done = true; t.reply = reply; t.at = Date.now(); }
+      })
       .catch((e) => {
         console.error("[bridge] async agent turn failed:", e);
         const t = turns.get(turnId);
-        if (t) { t.done = true; t.error = "agent turn failed"; }
+        if (t) { t.done = true; t.error = "agent turn failed"; t.at = Date.now(); }
       });
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ turnId }));
@@ -173,6 +183,8 @@ http.createServer(async (req, res) => {
       res.writeHead(404, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: "unknown turn" }));
     }
+    t.at = Date.now(); // being polled = alive; see gcTurns
+
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({
       text: t.text, done: t.done,

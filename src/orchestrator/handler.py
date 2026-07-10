@@ -2,7 +2,9 @@
 
 One Lambda, three roles selected by event shape:
   - Function URL HTTP event      -> ROUTER (fast: ACK Telegram in <1s, hand off to worker)
-  - {"_worker": {...}}           -> WORKER (async self-invoke: ensure VM, run turn, reply)
+  - {"_worker": {...}}           -> WORKER (async self-invoke: ensure VM, run turn, reply;
+                                    turns outliving one invocation relay to a successor
+                                    via {"_worker": {"resume": ...}} — see stream_turn_to_telegram)
   - {"_sweeper": true} (EventBridge) -> SWEEPER (reap idle, reconcile)
 
 Registry (DynamoDB): tenantId -> microvmId, endpoint, generation, state, launchedAt,
@@ -15,6 +17,7 @@ alive -> forward; dead -> cold-start.
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -30,6 +33,9 @@ EXEC_ROLE_ARN = os.environ["EXEC_ROLE_ARN"]
 INGRESS = os.environ["INGRESS_CONNECTOR"]
 EGRESS = os.environ["EGRESS_CONNECTOR"]
 IDLE_REAP_SECONDS = int(os.environ.get("IDLE_REAP_SECONDS", "3600"))
+# A turn that outlives one worker invocation is handed to a fresh one (chained
+# self-invoke). 120 hops x ~4.5min (300s timeout) covers the VM's full 8h life.
+MAX_TURN_HOPS = int(os.environ.get("MAX_TURN_HOPS", "120"))
 
 mv = boto3.client("lambda-microvms", region_name=REGION)
 lam = boto3.client("lambda", region_name=REGION)
@@ -123,37 +129,70 @@ def tg_edit(bot_token, chat_id, message_id, text):
         urllib.request.urlopen(
             f"https://api.telegram.org/bot{bot_token}/editMessageText", data, timeout=20)
         return True
+    except urllib.error.HTTPError as e:
+        print(f"[worker] edit failed: {e} body={e.read()[:200]}", flush=True)
+        return False
     except Exception as e:
         print(f"[worker] edit failed: {e}", flush=True)
         return False
 
 
 def stream_turn_to_telegram(endpoint, token, text, session, attachments,
-                            bot, chat_id):
+                            bot, chat_id, tid, ctx, resume=None):
     """Pseudo-streaming: async turn + poll /progress, growing one Telegram message.
 
     Telegram has no true streaming — the standard technique is a placeholder
     message repeatedly edited via editMessageText (~1 edit/sec/chat allowed;
     we edit every ~2s). Falls back to the sync path if the async start fails.
-    """
-    st, body = call_vm(endpoint, "/chat-async", token, "POST",
-                       {"m": text, "s": session, "attachments": attachments or []},
-                       timeout=30)
-    turn_id = json.loads(body).get("turnId")
-    if not turn_id:
-        raise RuntimeError("no turnId from /chat-async")
 
-    msg_id = tg_send_placeholder(bot, chat_id)
-    last_len = 0
-    deadline = time.time() + 280
+    A turn that outlives this Lambda invocation is NOT lost: just before the
+    invocation times out, polling is handed to a fresh async self-invoke
+    (carrying turnId + message state), the same chaining the router uses for
+    the webhook handoff. Returns None on handoff — the successor owns delivery.
+    A single turn is thus bounded by the VM's 8h lifetime, not Lambda's 15 min.
+    """
+    if resume:
+        turn_id = resume["turnId"]
+        msg_id = resume.get("msgId")
+        last_len = int(resume.get("lastLen", 0))
+        hops = int(resume.get("hops", 0))
+    else:
+        st, body = call_vm(endpoint, "/chat-async", token, "POST",
+                           {"m": text, "s": session, "attachments": attachments or []},
+                           timeout=30)
+        turn_id = json.loads(body).get("turnId")
+        if not turn_id:
+            raise RuntimeError("no turnId from /chat-async")
+        msg_id = tg_send_placeholder(bot, chat_id)
+        last_len, hops = 0, 0
+
     reply = None
     # 1.2s ≈ Telegram's per-chat edit ceiling (~1/s) with headroom; a failed
     # edit (e.g. 429) leaves last_len unchanged so the next cycle retries.
-    while time.time() < deadline:
+    while True:
+        # Hand off before this invocation's timeout would silently kill polling.
+        # 20s leaves room for one in-flight poll + the invoke round-trip.
+        if ctx.get_remaining_time_in_millis() < 20_000:
+            if hops + 1 >= MAX_TURN_HOPS:
+                reply = "(turn exceeded the relay budget — increase MAX_TURN_HOPS)"
+                break
+            lam.invoke(FunctionName=FN_NAME, InvocationType="Event",
+                       Payload=json.dumps({"_worker": {"tenantId": tid, "resume": {
+                           "turnId": turn_id, "chatId": chat_id, "msgId": msg_id,
+                           "lastLen": last_len, "hops": hops + 1}}}).encode())
+            print(f"[worker] turn {turn_id} handed off (hop {hops + 1})", flush=True)
+            return None
         time.sleep(1.2)
         try:
             st, body = call_vm(endpoint, f"/progress?id={turn_id}", token, timeout=15)
             prog = json.loads(body)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Bridge no longer knows the turn (VM replaced / bridge restarted
+                # mid-turn) — retrying or relaying can never recover it.
+                reply = "(turn lost — the VM was replaced mid-turn, please retry)"
+                break
+            continue
         except Exception:
             continue
         if prog.get("done"):
@@ -163,11 +202,11 @@ def stream_turn_to_telegram(endpoint, token, text, session, attachments,
             break
         cur = prog.get("text") or ""
         # Grow the placeholder with partial text; "▌" cursor marks in-progress.
-        if msg_id and len(cur) > last_len:
+        # Stop editing once past Telegram's 4096-char message cap: tg_edit
+        # truncates, so further edits would be byte-identical -> 400 spam.
+        if msg_id and len(cur) > last_len and last_len < 3990:
             if tg_edit(bot, chat_id, msg_id, cur + " ▌"):
                 last_len = len(cur)
-    if reply is None:
-        reply = "(timed out)"
     if msg_id:
         tg_edit(bot, chat_id, msg_id, reply)
     else:
@@ -304,7 +343,36 @@ def ensure_vm(tid, item):
 
 
 # ---------- WORKER (async) ----------
-def worker(payload):
+def resume_turn(payload, ctx):
+    """Successor invocation in a turn relay: keep polling an in-flight turn."""
+    tid = payload["tenantId"]
+    resume = payload["resume"]
+    item = get_tenant(tid)
+    bot, chat_id = item.get("botToken"), resume["chatId"]
+    try:
+        endpoint = item["endpoint"]
+        token = mint_token(item["microvmId"])
+    except Exception as e:
+        # VM died mid-turn (e.g. hit its 8h max lifetime) — tell the user
+        # instead of failing silently.
+        print(f"[worker] resume for {tid} found no live VM: {e}", flush=True)
+        note = "(turn lost — the VM ended mid-turn, please retry)"
+        if resume.get("msgId"):
+            tg_edit(bot, chat_id, resume["msgId"], note)
+        else:
+            tg_send(bot, chat_id, note)
+        return {"tenant": tid, "resumed": False, "error": "vm gone"}
+    reply = stream_turn_to_telegram(endpoint, token, None, None, None,
+                                    bot, chat_id, tid, ctx, resume=resume)
+    if reply is None:
+        return {"tenant": tid, "handedOff": True}
+    ddb.update_item(Key={"tenantId": tid},
+                    UpdateExpression="SET lastActiveAt=:t",
+                    ExpressionAttributeValues={":t": now()})
+    return {"tenant": tid, "resumed": True, "reply": reply[:80]}
+
+
+def worker(payload, ctx):
     tid = payload["tenantId"]
     update = payload["update"]
     item = get_tenant(tid)
@@ -333,7 +401,12 @@ def worker(payload):
         # Telegram path: pseudo-stream via placeholder + editMessageText.
         try:
             reply = stream_turn_to_telegram(
-                endpoint, token, text, session, attachments, bot, chat_id)
+                endpoint, token, text, session, attachments, bot, chat_id,
+                tid, ctx)
+            if reply is None:
+                # Turn outlived this invocation; a chained self-invoke now owns
+                # polling + delivery. lastActiveAt is updated by the last hop.
+                return {"tenant": tid, "cold": cold, "handedOff": True}
         except Exception as e:
             # Streaming plumbing failed (old image, bridge restart, ...):
             # fall back to the sync turn + single send.
@@ -443,7 +516,9 @@ def sweeper():
 
 def handler(event, context):
     if isinstance(event, dict) and "_worker" in event:
-        return worker(event["_worker"])
+        if "resume" in event["_worker"]:
+            return resume_turn(event["_worker"], context)
+        return worker(event["_worker"], context)
     if isinstance(event, dict) and event.get("_sweeper"):
         return sweeper()
     if isinstance(event, dict) and ("rawPath" in event or "requestContext" in event):
