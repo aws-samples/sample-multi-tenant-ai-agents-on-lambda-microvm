@@ -53,7 +53,7 @@ BUCKET="${STACK}-artifact-${ACCOUNT}-${REGION}"
 # updates the Lambda when a resource PROPERTY changes, so a fixed key means code
 # changes silently never reach AWS on redeploy. Hash of the inputs fixes that
 # (and makes an unchanged redeploy a true no-op).
-IMG_SRC="Dockerfile openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs materialize-models.mjs"
+IMG_SRC="Dockerfile openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs materialize-models.mjs patch-tts-ja.mjs"
 IMG_HASH="$(cd "$HERE/microvm" && cat $IMG_SRC | shasum -a 256 | cut -c1-12)"
 IMG_KEY="microvm-images/openclaw-${IMG_HASH}.zip"
 CODE_HASH="$(shasum -a 256 "$HERE/orchestrator/handler.py" | cut -c1-12)"

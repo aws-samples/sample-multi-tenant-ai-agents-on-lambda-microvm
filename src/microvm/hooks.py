@@ -36,7 +36,10 @@ def agent_turn(message: str, session: str, attachments=None) -> bytes:
             d = json.loads(r.read())
     if "error" in d:
         return json.dumps({"error": d["error"]}).encode()
-    return json.dumps({"result": {"payloads": [{"text": d.get("reply", "")}]}}).encode()
+    payload = {"text": d.get("reply", "")}
+    if d.get("media"):
+        payload["media"] = d["media"]
+    return json.dumps({"result": {"payloads": [payload]}}).encode()
 
 
 def check(path: str):
@@ -88,6 +91,23 @@ class H(BaseHTTPRequestHandler):
                 self._send(e.code, e.read())
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode())
+        elif self.path.startswith("/media"):
+            # Fetch a gateway-produced outbound media file (e.g. TTS audio) so the
+            # orchestrator can forward it to the channel. Restricted to the
+            # gateway's own outbound-media dir — no general file read.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            path = os.path.realpath((q.get("path") or [""])[0])
+            allowed = "/home/node/.openclaw/media/outbound/"
+            if not path.startswith(allowed) or not os.path.isfile(path):
+                self._send(404, b'{"error":"no such media"}')
+                return
+            with open(path, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif self.path.startswith("/chat"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             msg = (q.get("m") or ["Say pong"])[0]

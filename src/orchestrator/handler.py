@@ -100,6 +100,40 @@ def tg_send(bot_token, chat_id, text):
         return body
 
 
+def tg_send_voice(bot_token, chat_id, audio, filename="voice.mp3"):
+    """Send audio bytes as a Telegram voice message (multipart upload).
+
+    Telegram renders OGG/Opus, MP3 and M4A as a playable voice bubble."""
+    boundary = "----ocvoice"
+    parts = []
+    for k, v in (("chat_id", str(chat_id)),):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f"name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"voice\"; "
+                 f"filename=\"{filename}\"\r\nContent-Type: audio/mpeg\r\n\r\n".encode())
+    body = b"".join(parts) + audio + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendVoice", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        ok = json.loads(r.read()).get("ok")
+        print(f"[worker] tg_send_voice ok={ok} chat={chat_id} bytes={len(audio)}", flush=True)
+        return ok
+
+
+def deliver_media(endpoint, token, media, bot, chat_id):
+    """Forward gateway-produced media (TTS audio) to Telegram. Best-effort."""
+    for m in media or []:
+        if m.get("kind") != "audio":
+            continue
+        try:
+            q = urllib.parse.urlencode({"path": m["url"]})
+            st, data = call_vm(endpoint, f"/media?{q}", token, timeout=60)
+            tg_send_voice(bot, chat_id, data, m["url"].rsplit("/", 1)[-1])
+        except Exception as e:
+            print(f"[worker] media delivery failed ({m.get('url')}): {e}", flush=True)
+
+
 def tg_typing(bot_token, chat_id):
     try:
         data = urllib.parse.urlencode({"chat_id": chat_id, "action": "typing"}).encode()
@@ -166,7 +200,7 @@ def stream_turn_to_telegram(endpoint, token, text, session, attachments,
         msg_id = tg_send_placeholder(bot, chat_id)
         last_len, hops = 0, 0
 
-    reply = None
+    reply, media = None, None
     # 1.2s ≈ Telegram's per-chat edit ceiling (~1/s) with headroom; a failed
     # edit (e.g. 429) leaves last_len unchanged so the next cycle retries.
     while True:
@@ -197,6 +231,7 @@ def stream_turn_to_telegram(endpoint, token, text, session, attachments,
             continue
         if prog.get("done"):
             reply = prog.get("reply") or prog.get("text") or "(no reply)"
+            media = prog.get("media")
             if prog.get("error"):
                 reply = "(agent error — try again)"
             break
@@ -211,6 +246,7 @@ def stream_turn_to_telegram(endpoint, token, text, session, attachments,
         tg_edit(bot, chat_id, msg_id, reply)
     else:
         tg_send(bot, chat_id, reply)
+    deliver_media(endpoint, token, media, bot, chat_id)
     return reply
 
 
@@ -413,9 +449,11 @@ def worker(payload, ctx):
             print(f"[worker] stream path failed ({e}); falling back to sync", flush=True)
             st, body = run_turn(endpoint, token, text, session, attachments)
             d = json.loads(body)
-            reply = " ".join(p.get("text", "") for p in
-                             d.get("result", {}).get("payloads", [])) or "(no reply)"
+            payloads = d.get("result", {}).get("payloads", [])
+            reply = " ".join(p.get("text", "") for p in payloads) or "(no reply)"
             tg_send(bot, chat_id, reply)
+            for p in payloads:
+                deliver_media(endpoint, token, p.get("media"), bot, chat_id)
     else:
         # No bot token (chat.sh / HTTP test path): synchronous turn, unchanged.
         st, body = run_turn(endpoint, token, text, session, attachments)

@@ -6,11 +6,14 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends nfs-common \
     && rm -rf /var/lib/apt/lists/*
 
-COPY openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs materialize-models.mjs /opt/poc/
+COPY openclaw.json hooks.py start.sh efs-monitor.sh gw-bridge.cjs materialize-models.mjs patch-tts-ja.mjs /opt/poc/
 RUN chmod +x /opt/poc/start.sh /opt/poc/efs-monitor.sh \
     && mkdir -p /home/node/.openclaw /mnt/efs \
     && cp /opt/poc/openclaw.json /home/node/.openclaw/openclaw.json \
     && HOME=/home/node node /app/openclaw.mjs plugins install @openclaw/amazon-bedrock-provider \
+    # Teach the Edge TTS voice picker to speak Japanese (stock only auto-switches
+    # to Chinese for CJK; kana-based Japanese detection is missing upstream).
+    && node /opt/poc/patch-tts-ja.mjs \
     && chown -R node:node /home/node \
     # Gateway runs as root; OpenClaw blocks plugins whose files aren't root-owned
     # ("suspicious ownership" guard), so the plugin tree must stay root:root.
