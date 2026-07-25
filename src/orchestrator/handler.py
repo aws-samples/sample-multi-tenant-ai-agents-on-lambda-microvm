@@ -328,36 +328,46 @@ def cold_start(tid, item):
         egressNetworkConnectors=[EGRESS],
         idlePolicy={"autoResumeEnabled": True, "maxIdleDurationSeconds": 900,
                     "suspendedDurationSeconds": 3600},
+        # Delivered as the body of the VM's /run hook, which the platform calls
+        # before the endpoint accepts traffic — so the sidecar knows its tenant and
+        # efs-monitor starts mounting while we're still waiting for RUNNING. Saves
+        # the old assign-tenant round trip entirely.
+        runHookPayload=json.dumps({"tenantId": tid}),
         maximumDurationInSeconds=28800)
     microvm_id, endpoint = r["microvmId"], r["endpoint"]
+    t_launch = time.time()
 
-    # wait RUNNING
-    for _ in range(40):
+    # wait RUNNING (1s granularity: the whole point is to not sit on a ready VM)
+    for _ in range(120):
         if mv_state(microvm_id) == "RUNNING":
             break
-        time.sleep(3)
+        time.sleep(1)
+    t_running = time.time()
     token = mint_token(microvm_id)
+    t_token = time.time()
 
-    # assign tenant -> unblocks efs-monitor -> mounts per-tenant subdir -> bounces gateway
-    for _ in range(20):
-        try:
-            call_vm(endpoint, "/tenant", token, "POST", {"tenantId": tid}, timeout=15)
-            break
-        except Exception:
-            time.sleep(3)
-
-    # gate on EFS adoption + gateway healthy
-    ready = False
-    for _ in range(40):
+    # Gate on EFS adoption + gateway healthy. /health also reports the tenant the
+    # /run hook recorded; if it's missing, assign it over HTTP as a fallback.
+    ready, assigned = False, False
+    for i in range(150):
         try:
             st, body = call_vm(endpoint, "/health", token, timeout=15)
             h = json.loads(body)
             if h.get("efsReady") and h.get("healthz") == 200:
                 ready = True
                 break
+            if not h.get("tenant") and not assigned:
+                print(f"[cold] {tid}: run hook left no tenant; assigning over HTTP",
+                      flush=True)
+                call_vm(endpoint, "/tenant", token, "POST", {"tenantId": tid}, timeout=15)
+                assigned = True
         except Exception:
             pass
-        time.sleep(3)
+        time.sleep(1)
+    t_ready = time.time()
+    print(f"[cold] {tid} timing: run->RUNNING {t_running - t_launch:.1f}s, "
+          f"token {t_token - t_running:.1f}s, RUNNING->efsReady {t_ready - t_token:.1f}s, "
+          f"total {t_ready - t_launch:.1f}s", flush=True)
 
     item = {**item, "tenantId": tid, "microvmId": microvm_id, "endpoint": endpoint,
             "generation": gen, "state": "RUNNING", "launchedAt": now(),

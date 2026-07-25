@@ -117,7 +117,7 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
 | `template.yaml` | All declarative infra + IAM |
 | `deploy.sh` | Pre-flight + artifact upload (content-hashed keys) + one CFN deploy |
 | `add-tenant.sh` / `chat.sh` / `teardown.sh` | Lifecycle helpers |
-| `microvm/` | The MicroVM image: Dockerfile, `openclaw.json` (gateway + vision-capable model seed + discovery config), `hooks.py` (sidecar: /health,/tenant,/chat,/chat-async,/progress,/files + lifecycle hooks), `efs-monitor.sh` (tenant-aware EFS mount daemon + config authority + session heal), `materialize-models.mjs` (bakes live Bedrock model discovery into the config at cold start), `gw-bridge.cjs` (persistent WS to the warm gateway; sync turns, async turns with streamed-text polling, image attachments), `start.sh` (supervisor) |
+| `microvm/` | The MicroVM image: Dockerfile, `openclaw.json` (gateway + vision-capable model seed + discovery config), `hooks.py` (sidecar: /health,/tenant,/chat,/chat-async,/progress,/media,/files + the platform lifecycle hooks — ready/validate snapshot+prefetch, run tenant injection), `efs-monitor.sh` (tenant-aware EFS mount daemon + config authority + session heal), `materialize-models.mjs` (bakes live Bedrock model discovery into the config at cold start), `gw-bridge.cjs` (persistent WS to the warm gateway; sync turns, async turns with streamed-text polling, image attachments), `start.sh` (supervisor) |
 | `orchestrator/handler.py` | Router (fast-ACK) + Worker (ensure-VM, run turn — streaming edits + images on Telegram) + Sweeper |
 
 ## Design notes / gotchas baked into this IaC (learned the hard way)
@@ -149,6 +149,13 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
     Fix: just before timing out, the worker hands polling to a fresh async self-invoke
     (turnId + message state), so a single turn is bounded by the VM's 8h lifetime, not
     by Lambda's 15 min.
+11. **Cold start is ~12s wall clock (was 48s), via the image-build hooks + two NFS
+    fixes.** `/ready` gates the snapshot, `/validate` drives page prefetch, `/run`
+    delivers the tenantId. Two traps worth knowing before touching this: the prewarm in
+    `hooks.py` needs Bedrock perms on the **build** role or it samples nothing, and
+    recursive `chown` over NFS costs one round trip per file. Full measurements,
+    rejected approaches, and how to re-measure:
+    [`../docs/perf/cold-start.md`](../docs/perf/cold-start.md).
 
 Each of these was hit and fixed during live verification; the reasoning is captured in
 [`../docs/design/`](../docs/design/).

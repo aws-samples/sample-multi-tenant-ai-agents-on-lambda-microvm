@@ -8,10 +8,29 @@
 // guard does read. Fallback: on any failure the config keeps whatever models
 // array it already has (the static seed list baked into the image).
 //
-// Runs as: node materialize-models.mjs <config-path>   (before gateway starts)
+// Discovery costs ~1.6s of every cold start while the Bedrock catalog changes on the
+// order of weeks, so the result is cached (per tenant, on EFS) and reused until the
+// TTL elapses. A cache hit is a single file read.
+//
+// Runs as: node materialize-models.mjs <config-path> [cache-path]  (before gateway starts)
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 
 const CONFIG_PATH = process.argv[2] || "/home/node/.openclaw/openclaw.json";
+const CACHE_PATH = process.argv[3] || null;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function readCache() {
+  if (!CACHE_PATH) return null;
+  try {
+    const c = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+    if (!Array.isArray(c.models) || !c.models.length) return null;
+    const age = Date.now() - (c.at || 0);
+    if (age < 0 || age > CACHE_TTL_MS) return null;
+    return { models: c.models, ageMs: age };
+  } catch {
+    return null;
+  }
+}
 
 // The plugin project dir carries a content-hash suffix that changes across
 // plugin versions — locate it instead of hardcoding.
@@ -36,21 +55,37 @@ try {
     process.exit(0);
   }
 
-  const { discoverBedrockModels } = await import(
-    `${findPluginDir()}/dist/discovery.js`
-  );
-  const models = await discoverBedrockModels({
-    region: discovery.region || process.env.AWS_REGION || "us-east-1",
-    config: { ...discovery, refreshInterval: 0 },
-  });
-  if (!Array.isArray(models) || models.length === 0)
-    throw new Error("discovery returned no models");
+  const cached = readCache();
+  let models, source;
+  if (cached) {
+    models = cached.models;
+    source = `cache (age ${Math.round(cached.ageMs / 3600000)}h)`;
+  } else {
+    const { discoverBedrockModels } = await import(
+      `${findPluginDir()}/dist/discovery.js`
+    );
+    models = await discoverBedrockModels({
+      region: discovery.region || process.env.AWS_REGION || "us-east-1",
+      config: { ...discovery, refreshInterval: 0 },
+    });
+    if (!Array.isArray(models) || models.length === 0)
+      throw new Error("discovery returned no models");
+    source = "live discovery";
+    if (CACHE_PATH) {
+      try {
+        writeFileSync(CACHE_PATH, JSON.stringify({ at: Date.now(), models }));
+      } catch (e) {
+        console.log(`[materialize-models] cache write failed: ${e.message}`);
+      }
+    }
+  }
 
   provider.models = models;
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 1));
   const withImage = models.filter((m) => m.input?.includes("image")).length;
   console.log(
-    `[materialize-models] wrote ${models.length} models (${withImage} vision) to ${CONFIG_PATH}`,
+    `[materialize-models] wrote ${models.length} models (${withImage} vision)`
+      + ` from ${source} to ${CONFIG_PATH}`,
   );
 } catch (e) {
   console.log(

@@ -1,6 +1,13 @@
 # Docs
 
-The "why" behind the code in [`../src/`](../src/): the design decisions made while building.
+The "why" behind the code in [`../src/`](../src/): decisions made while building, and
+measurements taken after.
+
+## perf/ — measured tuning of the running system
+
+| File | What it covers |
+|---|---|
+| [cold-start.md](perf/cold-start.md) | Cold start 48s → ~12s: image-build hooks (`/ready`, `/validate` page prefetch, `/run`), the NFS `chown` and model-discovery costs, the prefetch ceiling, and two rejected approaches |
 
 ## design/ — decisions made before/while building
 

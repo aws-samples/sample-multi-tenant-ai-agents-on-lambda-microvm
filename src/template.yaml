@@ -228,6 +228,22 @@ Resources:
               - Effect: Allow
                 Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*'
+              # The /validate prewarm exercises live model discovery and one agent turn
+              # so the platform samples those pages for prefetch. Without these, both
+              # calls die at IAM before any SDK/TLS/catalog code runs — the pages that
+              # actually dominate cold start never get sampled. Read-only discovery +
+              # invoke only; the build phase must never do autonomous agent work
+              # (see the heartbeat note in openclaw.json).
+              - Sid: PrewarmBedrock
+                Effect: Allow
+                Action: [bedrock:ListFoundationModels, bedrock:ListInferenceProfiles]
+                Resource: '*'
+              - Sid: PrewarmInvoke
+                Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - !Sub 'arn:aws:bedrock:*::foundation-model/*'
+                  - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
 
   # ---------- IAM: MicroVM execution role (runtime: Bedrock via inference profile + logs) ----------
   MicroVMExecutionRole:
@@ -321,12 +337,31 @@ Resources:
       Logging:
         CloudWatch:
           LogGroup: !Sub '/aws/lambda-microvms/${ProjectName}-openclaw'
-      # No hooks: the app has no /ready hook, and specifying a hooks Port without any hook
-      # enabled is rejected. The gateway boots fast enough that the platform snapshots after
-      # ENTRYPOINT init without a readiness gate (verified: hookless builds succeed).
+      # Cold-start hooks, all served by the sidecar on the port below.
+      #   Ready    — gates the snapshot until the gateway is healthy AND the bridge's
+      #              WebSocket is up, so every launch restores an already-warm gateway
+      #              instead of repeating boot.
+      #   Validate — runs on a throwaway VM restored from that snapshot; the platform
+      #              samples which snapshot pages get touched and PREFETCHES them on all
+      #              later launches. Disk pages are demand-paged at a few MB/s, so this
+      #              is the single biggest cold-start lever: hooks.py walks the real
+      #              cold-start path (NFS mount, model discovery, gateway bounce, one turn).
+      #   Run      — per-VM init: carries the tenantId as runHookPayload, so the tenant is
+      #              assigned before traffic is accepted (no post-launch round trip, and
+      #              efs-monitor starts mounting immediately).
+      # Ready/Validate timeouts are ceilings, not costs — the sidecar answers 200 as soon
+      # as it's done, and self-releases before either deadline so a slow probe can never
+      # fail the build.
       Hooks:
-        MicrovmHooks: {}
-        MicrovmImageHooks: {}
+        Port: 8080
+        MicrovmHooks:
+          Run: ENABLED
+          RunTimeoutInSeconds: 10
+        MicrovmImageHooks:
+          Ready: ENABLED
+          ReadyTimeoutInSeconds: 300
+          Validate: ENABLED
+          ValidateTimeoutInSeconds: 600
       EnvironmentVariables:
         - Key: OPENCLAW_GATEWAY_TOKEN
           Value: !Ref GatewayToken
