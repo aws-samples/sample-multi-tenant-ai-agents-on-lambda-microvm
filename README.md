@@ -7,6 +7,16 @@
 [![AWS Lambda MicroVMs](https://img.shields.io/badge/AWS-Lambda%20MicroVMs-FF9900?logo=amazonaws&logoColor=white)](https://aws.amazon.com/about-aws/whats-new/2026/06/aws-lambda-microvms/)
 [![Verified live on AWS](https://img.shields.io/badge/verified%20live-Jun%202026-brightgreen.svg)](docs/)
 
+> [!IMPORTANT]
+> **This is a sample project, not a production system.** Its purpose is to show the core
+> multi-tenant orchestration logic — one Firecracker MicroVM per tenant, cold-started,
+> resumed and reaped on demand, with per-tenant state — and everything around that is
+> kept deliberately minimal. The security machinery a real multi-tenant service needs
+> (end-user authentication and authorization, secrets management, per-tenant rate limits
+> and spend caps, abuse and prompt-injection defenses, auditing) is **out of scope here
+> and is yours to implement.** Do not expose a deployment to untrusted users as-is —
+> [Not production-ready](#not-production-ready) lists the specific gaps.
+
 A working, end-to-end system: run a self-hosted AI agent
 ([OpenClaw](https://github.com/openclaw/openclaw)) **one isolated MicroVM per tenant**,
 with per-tenant state persisted on EFS, model calls served by Amazon Bedrock, and a
@@ -88,7 +98,7 @@ survives on EFS across VM generations.
 
 Four commands take you from an empty account to a talking agent. You need AWS CLI v2 with
 the `lambda-microvms` subcommands and credentials for a [MicroVMs launch
-region](#requirements--notes) — `deploy.sh` pre-flights both before touching anything.
+region](#requirements) — `deploy.sh` pre-flights both before touching anything.
 Full prerequisites and the Telegram-push path are in [`src/README.md`](src/README.md).
 
 ```bash
@@ -117,25 +127,73 @@ cd src
 | [`docs/`](docs/) | The "why" behind the code: the design decisions taken while building. | [`docs/README.md`](docs/README.md) — index of the design notes |
 | [`tests/`](tests/) | Offline regression tests for the router's authentication rules — no AWS calls, no deployed stack. | `uv run --with pytest python -m pytest tests -q` |
 
-## Requirements & notes
+## Not production-ready
+
+What this sample covers is **tenant orchestration**: the registry, the two-branch router,
+cold start, resume, reap, and per-tenant state. The isolation boundary it builds on is
+real, but a multi-tenant *service* needs a great deal more than a boundary, and that part
+is not here. Read this section before deploying anything you care about.
+
+**What the sample does do**
+
+- One Firecracker MicroVM per tenant. The tenant id is delivered by the platform's run
+  hook, and OpenClaw's gateway stays loopback-only inside the VM — the orchestrator
+  reaches it only through a MicroVM auth token that is minted per turn, expires in ≤55
+  minutes, and is scoped to the single sidecar port.
+- Per-tenant state confined to its own subdirectory on an encrypted EFS filesystem.
+- Bedrock reached over VPC endpoints; separate IAM roles for image build, VM runtime, and
+  the orchestrator.
+- Exactly two public routes: `/tg/<tenantId>`, which requires that tenant's webhook secret
+  in `X-Telegram-Bot-Api-Secret-Token`, and `/health`. Everything else is 404, and no route
+  takes a tenantId from a URL and runs a caller-supplied prompt in that tenant's VM.
+  Synchronous testing goes through `chat.sh`, which invokes the orchestrator with your AWS
+  credentials rather than over the public API. Locked in by
+  [`tests/test_router_auth.py`](tests/test_router_auth.py); details in
+  [`src/README.md`](src/README.md#public-surface).
+- `deploy.sh` mints a random per-checkout gateway token on first run (kept in
+  `src/.gateway-token`, git-ignored, reused across redeploys) rather than shipping a shared
+  default; the `poc-microvm-token-42` strings left in code are inert fallbacks.
+
+**What you must add before anyone but you touches it**
+
+- **End-user authentication and authorization.** There is no identity layer and no notion
+  of a "caller". Tenants are provisioned by an operator holding AWS credentials
+  (`add-tenant.sh`), and the only authenticated caller at runtime is Telegram, via a shared
+  per-tenant secret. Any entry point you add for real users needs its own authenticator
+  (e.g. an API Gateway JWT authorizer) **and** a check that the authenticated principal owns
+  the tenant it is asking for — the tenant id must never be trusted just because it arrived
+  in a URL.
+- **Secrets management.** Tenant bot tokens and webhook secrets are stored as ordinary
+  DynamoDB attributes. Move them to Secrets Manager or SSM Parameter Store and grant the
+  orchestrator read access there instead.
+- **Rate limits, quotas and spend caps.** Nothing bounds a tenant: no per-tenant request
+  throttle, no ceiling on VM launches, no Bedrock token budget, and no protection in front
+  of the API. Cost is the denial-of-service vector here.
+- **Prompt-injection and tool-abuse defenses.** The agent has internet egress plus web
+  fetch/search tools, so content it reads can try to steer it. Constrain the tool set, the
+  reachable egress destinations, and what the agent is allowed to do with tenant data.
+- **Auditing and log hygiene.** CloudWatch receives operational logs only — there is no
+  per-tenant audit trail, and no log group declares a retention period, so logs (which do
+  carry tenant ids and Telegram chat ids) are kept forever by default.
+- **Availability and durability.** Single region, single AZ, one EFS mount target, no EFS
+  backup policy, no DynamoDB point-in-time recovery. The registry is the only record of
+  which VM and which state directory belong to which tenant.
+- **Storage hardening.** EFS Access Point with a non-root POSIX identity and single-writer
+  enforcement per tenant state directory — written up in
+  [`docs/design/storage-options.md`](docs/design/storage-options.md).
+
+None of the above is a defect report; it is the edge of this sample's scope, stated so you
+can see where your work starts. If you do find something that breaks the isolation the sample
+*does* claim — the two routes above, the per-tenant token scoping, the per-tenant state
+split — please report it via
+[CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications).
+
+## Requirements
 
 - **Region.** Deploy in a region where Lambda MicroVMs has launched (`us-east-1` was
   used for verification) — `deploy.sh` probes the target region up front and fails fast
   with the reason if the service isn't reachable there, so the launch list is never
   hardcoded.
-- **Security.** `deploy.sh` mints a random per-checkout gateway token on first run
-  (kept in `src/.gateway-token`, git-ignored, reused across redeploys); the
-  `poc-microvm-token-42` strings remaining in code are inert fallbacks, and the real
-  boundary is IAM + per-request auth tokens either way. To report a vulnerability,
-  see [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications).
-- **Public API surface.** API Gateway exposes exactly two routes: `/tg/<tenantId>`, which
-  requires that tenant's webhook secret in `X-Telegram-Bot-Api-Secret-Token`, and
-  `/health`. Everything else is 404 — there is no unauthenticated route that takes a
-  tenantId from the URL and runs a prompt in that tenant's MicroVM. Synchronous testing
-  goes through `chat.sh`, which invokes the orchestrator with your AWS credentials rather
-  than over the public API. See [`src/README.md`](src/README.md#public-surface).
-- **Maturity.** This is a sample verified live on AWS (June 2026), not production-hardened —
-  the open items for hardening are called out in [`docs/`](docs/).
 
 ## License
 

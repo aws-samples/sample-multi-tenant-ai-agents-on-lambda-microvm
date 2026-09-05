@@ -5,6 +5,13 @@ EFS, Bedrock via a VPC endpoint, and a push (Telegram-webhook) orchestrator behi
 API Gateway that cold-starts / resumes tenant VMs on demand. (Architecture diagram:
 [top-level README](../README.md#architecture).)
 
+> [!IMPORTANT]
+> This stack is a sample of tenant orchestration; it is **not production-ready** and the
+> security controls a real multi-tenant service needs are yours to implement. What it does
+> and does not protect is spelled out in
+> [Not production-ready](../README.md#not-production-ready) — read that before deploying
+> anything you care about.
+
 ## Why CloudFormation + a thin upload script
 
 Almost everything is declarative CloudFormation — **including** the MicroVM image and the
@@ -112,10 +119,10 @@ API Gateway exposes two routes and nothing else:
 
 Any other path is 404. There is deliberately no unauthenticated route that takes a
 tenantId from the URL and runs a prompt in that tenant's MicroVM: anyone knowing a
-tenantId could then execute inside another tenant's VM, which defeats the isolation this
-sample exists to demonstrate. That is why the synchronous path is `chat.sh` — a direct
-Lambda invoke with your AWS credentials — rather than an HTTP route. Both rules are locked
-in by [`../tests/test_router_auth.py`](../tests/test_router_auth.py):
+tenantId could then execute inside another tenant's VM, which defeats the per-tenant
+isolation this sample is built around. That is why the synchronous path is `chat.sh` —
+a direct Lambda invoke with your AWS credentials — rather than an HTTP route. Both rules
+are locked in by [`../tests/test_router_auth.py`](../tests/test_router_auth.py):
 
 ```bash
 uv run --with pytest python -m pytest ../tests -q
