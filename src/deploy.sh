@@ -138,6 +138,6 @@ cat <<EOF
   API endpoint : ${API}
   Gateway token: ${GATEWAY_TOKEN}  ${TOKEN_NOTE}
   Add a tenant : ./add-tenant.sh ${STACK} ${REGION} <tenantId> [telegramBotToken] [webhookSecret]
-  Test (HTTP)  : ./chat.sh ${STACK} ${REGION} <tenantId> "your message"
+  Test (CLI)   : ./chat.sh ${STACK} ${REGION} <tenantId> "your message"
   Teardown     : ./teardown.sh ${STACK} ${REGION}
 EOF

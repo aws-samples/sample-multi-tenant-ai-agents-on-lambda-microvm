@@ -73,7 +73,9 @@ replies with the token (`123456789:AA...`). Use a **dedicated bot per tenant** �
 webhook points that bot at this tenant's URL, so a bot you already use elsewhere would
 have its webhook overwritten. `<WEBHOOK_SECRET>` is any string you invent; the script
 passes it to Telegram's `setWebhook` and the router rejects updates that don't carry it
-back in `X-Telegram-Bot-Api-Secret-Token`.
+back in `X-Telegram-Bot-Api-Secret-Token`. That secret is **mandatory** for the webhook
+route: an HTTP-only tenant, registered without a bot token and secret, has no webhook and
+is deliberately unreachable through the API — drive it with `chat.sh`.
 
 ## Test
 
@@ -98,6 +100,26 @@ Over Telegram (not the HTTP test path) the worker also gives you:
   `/model default` to reset. The catalog is discovered live from Bedrock at each cold
   start (`materialize-models.mjs`), so newly launched models are switchable without a
   redeploy.
+
+## Public surface
+
+API Gateway exposes two routes and nothing else:
+
+| Route | Auth |
+|---|---|
+| `POST /tg/<tenantId>` | that tenant's `webhookSecret`, in `X-Telegram-Bot-Api-Secret-Token`. Missing or mismatched → 403; a tenant with no secret stored is *always* 403 |
+| `GET /health` | none — returns no tenant data |
+
+Any other path is 404. There is deliberately no unauthenticated route that takes a
+tenantId from the URL and runs a prompt in that tenant's MicroVM: anyone knowing a
+tenantId could then execute inside another tenant's VM, which defeats the isolation this
+sample exists to demonstrate. That is why the synchronous path is `chat.sh` — a direct
+Lambda invoke with your AWS credentials — rather than an HTTP route. Both rules are locked
+in by [`../tests/test_router_auth.py`](../tests/test_router_auth.py):
+
+```bash
+uv run --with pytest python -m pytest ../tests -q
+```
 
 ## Teardown
 

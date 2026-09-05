@@ -115,6 +115,7 @@ cd src
 |---|---|---|
 | [`src/`](src/) | **Start here.** Reproduce the whole system from zero — CloudFormation template, one-command deploy, tenant/lifecycle scripts, the MicroVM image, the orchestrator. | [`src/README.md`](src/README.md) — prerequisites, step-by-step deploy/test/teardown, gotchas |
 | [`docs/`](docs/) | The "why" behind the code: the design decisions taken while building. | [`docs/README.md`](docs/README.md) — index of the design notes |
+| [`tests/`](tests/) | Offline regression tests for the router's authentication rules — no AWS calls, no deployed stack. | `uv run --with pytest python -m pytest tests -q` |
 
 ## Requirements & notes
 
@@ -127,6 +128,12 @@ cd src
   `poc-microvm-token-42` strings remaining in code are inert fallbacks, and the real
   boundary is IAM + per-request auth tokens either way. To report a vulnerability,
   see [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications).
+- **Public API surface.** API Gateway exposes exactly two routes: `/tg/<tenantId>`, which
+  requires that tenant's webhook secret in `X-Telegram-Bot-Api-Secret-Token`, and
+  `/health`. Everything else is 404 — there is no unauthenticated route that takes a
+  tenantId from the URL and runs a prompt in that tenant's MicroVM. Synchronous testing
+  goes through `chat.sh`, which invokes the orchestrator with your AWS credentials rather
+  than over the public API. See [`src/README.md`](src/README.md#public-surface).
 - **Maturity.** This is a sample verified live on AWS (June 2026), not production-hardened —
   the open items for hardening are called out in [`docs/`](docs/).
 

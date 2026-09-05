@@ -465,7 +465,7 @@ def worker(payload, ctx):
             for p in payloads:
                 deliver_media(endpoint, token, p.get("media"), bot, chat_id)
     else:
-        # No bot token (chat.sh / HTTP test path): synchronous turn, unchanged.
+        # No bot token (chat.sh direct-invoke path): synchronous turn, unchanged.
         st, body = run_turn(endpoint, token, text, session, attachments)
         d = json.loads(body)
         reply = " ".join(p.get("text", "") for p in
@@ -492,10 +492,14 @@ def router(event):
         item = get_tenant(tid)
         if not item:
             return {"statusCode": 404, "body": "unknown tenant"}
-        # verify Telegram secret token
+        # Verify Telegram's secret token. Fail CLOSED when the tenant has no
+        # webhookSecret: add-tenant.sh only calls setWebhook when both a bot
+        # token and a secret are given, so a secret-less tenant has no webhook
+        # registered at all — a request arriving here for one can only be an
+        # unauthenticated caller trying to drive that tenant's VM.
         want = item.get("webhookSecret")
         got = headers.get("x-telegram-bot-api-secret-token")
-        if want and got != want:
+        if not want or got != want:
             return {"statusCode": 403, "body": "bad secret"}
         update = json.loads(body or "{}")
         # hand off to worker asynchronously; ACK Telegram immediately
@@ -503,30 +507,10 @@ def router(event):
                    Payload=json.dumps({"_worker": {"tenantId": tid, "update": update}}).encode())
         return {"statusCode": 200, "body": "ok"}
 
-    # /chat/<tenantId>?m=... — synchronous test entry (no Telegram); ensures VM + runs a turn inline.
-    if len(parts) == 2 and parts[0] == "chat":
-        tid = parts[1]
-        item = get_tenant(tid)
-        if not item:
-            return {"statusCode": 404, "body": "unknown tenant"}
-        qs = urllib.parse.parse_qs(event.get("rawQueryString", ""))
-        msg = (qs.get("m") or ["Say pong"])[0]
-        sess = (qs.get("s") or ["http-demo"])[0]
-        try:
-            item, cold = ensure_vm(tid, item)
-            token = mint_token(item["microvmId"])  # fresh per call (see worker note)
-            q2 = urllib.parse.urlencode({"m": msg, "s": sess})
-            st, body = call_vm(item["endpoint"], f"/chat?{q2}", token, timeout=280)
-            ddb.update_item(Key={"tenantId": tid},
-                            UpdateExpression="SET lastActiveAt=:t",
-                            ExpressionAttributeValues={":t": now()})
-            d = json.loads(body)
-            reply = " ".join(p.get("text", "") for p in
-                             d.get("result", {}).get("payloads", [])) or body.decode()[:200]
-            return {"statusCode": 200, "body": json.dumps({"tenant": tid, "cold": cold, "reply": reply})}
-        except Exception as e:
-            return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
-
+    # There is deliberately NO unauthenticated /chat/<tenantId> entry: taking the
+    # tenantId from the URL and running a caller-supplied prompt in that tenant's
+    # VM is a cross-tenant execution path. The synchronous test path is chat.sh,
+    # which invokes the worker with AWS credentials instead of over the public API.
     if raw == "/health":
         return {"statusCode": 200, "body": json.dumps({"ok": True, "role": "router"})}
     return {"statusCode": 404, "body": "not found"}
