@@ -99,9 +99,21 @@ HEAL
       T0=$(date +%s%3N)
       mount --bind "$TDIR" "$STATE_DIR"
       echo "[efs-monitor] timing: bind mount $(( $(date +%s%3N) - T0 ))ms"
-      touch "$MARKER"
-      echo "[efs-monitor] state dir now EFS-backed for tenant $TENANT; bouncing gateway"
-      pkill -f "openclaw.mjs gateway" || true
+      # Confirm the bind before declaring EFS ready. An unchecked bind fails INVISIBLY:
+      # the marker would still be touched, the orchestrator's efsReady gate would pass,
+      # and the gateway would go on serving the VM-local state dir — so every write dies
+      # with the generation and the tenant looks like a fresh install on the next cold
+      # start. Refusing the marker instead turns that into a loud cold-start failure.
+      # Read /proc/mounts, NOT `mountpoint`: mountpoint compares st_dev against the
+      # parent and so false-negatives on a bind whose source is the same device.
+      if grep -q " $STATE_DIR " /proc/mounts; then
+        touch "$MARKER"
+        echo "[efs-monitor] state dir now EFS-backed for tenant $TENANT; bouncing gateway"
+        pkill -f "openclaw.mjs gateway" || true
+      else
+        echo "[efs-monitor] FATAL: bind of $TDIR over $STATE_DIR did not take;" \
+             "refusing to mark EFS ready (tenant state would not persist)"
+      fi
     fi
   fi
   sleep 5
