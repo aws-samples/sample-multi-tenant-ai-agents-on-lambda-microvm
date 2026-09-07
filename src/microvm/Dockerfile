@@ -1,6 +1,21 @@
 # OpenClaw on Lambda MicroVMs — EFS-persisted state variant (arm64).
 # Runs as ROOT (mounting NFS needs privileges + ALL os capabilities at image level).
-FROM ghcr.io/openclaw/openclaw:slim
+# Base is PINNED BY DIGEST deliberately: `:slim` is a moving tag (today it resolves to
+# the same digest as `:latest`) and drifting off this version breaks the build silently
+# or not-so-silently. What a bump has to deal with, as of 2026.9.2:
+#   - 2026.8.1 unbundled the DuckDuckGo search provider into a separate official plugin,
+#     so openclaw.json's `tools.web.search.provider: duckduckgo` makes the gateway refuse to start
+#     ("web_search provider is not available", exit 78) — which fails the snapshot and
+#     therefore the whole image build. A bump needs
+#     `plugins install @openclaw/duckduckgo-plugin` BEFORE openclaw.json is in place:
+#     `plugins install` validates the config too, so the config naming an uninstalled
+#     provider makes the install itself exit 1.
+#   - patch-tts-ja.mjs patches compiled OpenClaw internals and only WARNS when its
+#     trigger stops matching, so Japanese TTS degrades without failing the build.
+#   - efs-monitor.sh's session heal reaches into the state layout by path
+#     (agents/main/sessions/sessions.json); that layout is version-coupled, so re-check
+#     it against the new version or the heal silently becomes a no-op.
+FROM ghcr.io/openclaw/openclaw:2026.6.11-slim@sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
 
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends nfs-common \
