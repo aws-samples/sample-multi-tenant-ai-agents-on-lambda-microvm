@@ -3,6 +3,14 @@
 > Design decision (why EFS). The empirical proof that EFS actually survives a MicroVM
 > generation swap was run separately; this doc is the reasoning, not the run log.
 
+> [!WARNING]
+> **The premise of the comparison below has expired.** S3 + Mountpoint was rejected because
+> it cannot append to OpenClaw's `.jsonl` session logs — and those files no longer exist:
+> 2026.9 keeps sessions in a single SQLite database. That database on NFS is now the dominant
+> cost of the whole system (~13s per warm turn against ~2s on local disk, ~42s of every cold
+> start). The trade-off needs re-deriving from the current storage shape, not patching.
+> Measurements: [../perf/cold-start.md](../perf/cold-start.md#correction-the-12s-figure-was-never-efs-backed).
+
 ## The problem
 
 A MicroVM's snapshot (guest disk + RAM) dies with the instance at the 8-hour cap. For an
@@ -26,9 +34,11 @@ as gotcha #2 in the deployment notes ([`../../src/README.md`](../../src/README.m
 
 ## Production hardening (open items, not needed for the PoC)
 
-- **EFS Access Point + non-root POSIX identity.** The root-run gateway writes root-owned
-  files onto EFS (NFS root-squash nuance). Fine for a PoC; production should pin a POSIX
-  user via an Access Point.
+- **EFS Access Point + non-root POSIX identity.** ~~The root-run gateway writes root-owned
+  files onto EFS.~~ Partly done: the gateway now runs as uid 1000 and its tenant directory is
+  owned by that uid, enforced inside the VM
+  ([nonroot-agent.md](nonroot-agent.md)). An Access Point would move the enforcement to the
+  EFS side, which is the part that survives root code execution in a VM.
 - **One live instance per EFS state dir.** EFS enables *shared* state, but OpenClaw is
   single-instance — enforce a single live writer per tenant state dir (the same invariant as
   "one Telegram poller per bot token").

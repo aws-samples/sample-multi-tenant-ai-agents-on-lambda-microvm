@@ -115,17 +115,28 @@ def prewarm():
         #    would stall validation until the platform ends the build.
         sh("timeout 20 mount -t nfs4 -o nfsvers=4.1,soft,timeo=30,retrans=1 "
            f"'{efs_host}:/' /mnt/efs", timeout=30)
-        # 2. Tenant-adoption toolchain: coreutils/python bits efs-monitor.sh shells to.
-        sh("mkdir -p /tmp/prewarm-state && cp -a /home/node/.openclaw/. /tmp/prewarm-state/; "
-           "chown -R root:root /tmp/prewarm-state; tr -cd 'a-z' </etc/hostname >/dev/null; "
-           "python3 -c 'import json; json.dumps({})'; pkill --version", timeout=60)
+        # 2. Tenant-adoption toolchain: the bits efs-monitor.sh shells to (tar for the
+        #    first-generation seed, iproute2 + getent for the uid routing, curl/pgrep for
+        #    the gateway-restart wait, python3 for the session heal).
+        sh("mkdir -p /tmp/prewarm-state && "
+           "( cd /home/node/.openclaw && tar -cf - --exclude=./npm . | tar -xf - -C /tmp/prewarm-state ); "
+           "chown -R 1000:1000 /tmp/prewarm-state; tr -cd 'a-z' </etc/hostname >/dev/null; "
+           "ip rule show >/dev/null; getent ahostsv4 localhost >/dev/null; curl --version >/dev/null; "
+           "python3 -c 'import json; json.dumps({})'; pgrep --version >/dev/null; pkill --version",
+           timeout=60)
         # 3. Live model discovery (node + the Bedrock plugin's dist tree + AWS SDK).
         sh("cp /opt/poc/openclaw.json /tmp/prewarm.json && "
            "node /opt/poc/materialize-models.mjs /tmp/prewarm.json", timeout=90)
         # 4. The gateway RESTART path — efs-monitor bounces the gateway after binding
-        #    EFS, so every cold start pays a second gateway boot. Sample it by using
-        #    the exact pattern efs-monitor.sh uses (pkill never matches itself).
-        sh("pkill -f 'openclaw.mjs gateway'", timeout=10)
+        #    EFS, so every cold start pays a second gateway boot. Sample it with the
+        #    exact pattern efs-monitor.sh uses: the gateway retitles itself
+        #    "openclaw-gateway" (2026.9+), and the anchor keeps the `sh -c` wrapper
+        #    quoting this pattern from matching — and killing — itself.
+        #    The lock-database cleanup mirrors it too: without it the restart burns ~40s
+        #    on "gateway already running (pid …)" instead of sampling a real boot.
+        sh("pkill -f '^(openclaw-gateway|node /app/openclaw.mjs gateway)'; "
+           "for _ in $(seq 1 120); do pgrep -f '^(openclaw-gateway|node /app/openclaw.mjs gateway)' "
+           ">/dev/null || break; sleep 0.5; done; rm -rf /tmp/openclaw-state-locks-*", timeout=70)
         # Wait for the supervisor's 2s backoff + a full re-boot, then confirm the
         # restarted gateway is actually serving before probing a turn through it.
         time.sleep(3)
@@ -200,6 +211,12 @@ def state_report() -> bytes:
         ["sh", "-c",
          "echo '--- tenant ---'; cat /var/run/tenant-id 2>&1; "
          "echo; echo '--- mounts ---'; grep -E 'efs|openclaw|nfs' /proc/mounts; "
+         "echo '--- efs root (empty once adopted: unmounted after the bind) ---'; ls -la /mnt/efs/ 2>&1 | head -5; "
+         # The gateway must be uid 1000 with an empty capability set and no_new_privs on;
+         # every tool the agent runs inherits exactly this.
+         "echo '--- gateway identity ---'; for p in $(pgrep -f '^(openclaw-gateway|node /app/openclaw.mjs gateway)'); do "
+         "echo pid=$p; grep -E '^(Uid|CapEff|CapBnd|NoNewPrivs):' /proc/$p/status; done; "
+         "echo '--- uid routing ---'; ip rule show 2>&1; ip route show table 100 2>&1; "
          "echo '--- marker ---'; ls -la /var/run/efs-mounted 2>&1; "
          "echo '--- state dir ---'; ls -la /home/node/.openclaw/ 2>&1 | head -14; "
          "echo '--- sessions ---'; ls -la /home/node/.openclaw/agents/main/sessions/ 2>&1 | head -8; "

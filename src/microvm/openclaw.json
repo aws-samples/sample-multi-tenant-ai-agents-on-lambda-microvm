@@ -71,7 +71,7 @@
     }
   },
   "plugins": {
-    "allow": ["amazon-bedrock"],
+    "allow": ["amazon-bedrock", "duckduckgo"],
     "entries": {
       "amazon-bedrock": {
         "config": {

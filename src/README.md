@@ -146,7 +146,7 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
 | `template.yaml` | All declarative infra + IAM |
 | `deploy.sh` | Pre-flight + artifact upload (content-hashed keys) + one CFN deploy |
 | `add-tenant.sh` / `chat.sh` / `teardown.sh` | Lifecycle helpers |
-| `microvm/` | The MicroVM image: Dockerfile, `openclaw.json` (gateway + vision-capable model seed + discovery config), `hooks.py` (sidecar: /health,/tenant,/chat,/chat-async,/progress,/media,/files + the platform lifecycle hooks — ready/validate snapshot+prefetch, run tenant injection), `efs-monitor.sh` (tenant-aware EFS mount daemon + config authority + session heal), `materialize-models.mjs` (bakes live Bedrock model discovery into the config at cold start), `gw-bridge.cjs` (persistent WS to the warm gateway; sync turns, async turns with streamed-text polling, image attachments), `start.sh` (supervisor) |
+| `microvm/` | The MicroVM image: Dockerfile, `openclaw.json` (gateway + vision-capable model seed + discovery config), `hooks.py` (sidecar: /health,/tenant,/chat,/chat-async,/progress,/media,/files + the platform lifecycle hooks — ready/validate snapshot+prefetch, run tenant injection), `efs-monitor.sh` (tenant-aware EFS mount daemon + config authority + session heal + the agent-confinement steps), `materialize-models.mjs` (bakes live Bedrock model discovery into the config at cold start), `gw-bridge.cjs` (persistent WS to the warm gateway; sync turns, async turns with streamed-text polling, image attachments), `start.sh` (supervisor; drops the gateway to uid 1000) |
 | `orchestrator/handler.py` | Router (fast-ACK) + Worker (ensure-VM, run turn — streaming edits + images on Telegram) + Sweeper |
 
 ## Design notes / gotchas baked into this IaC (learned the hard way)
@@ -178,13 +178,34 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
     Fix: just before timing out, the worker hands polling to a fresh async self-invoke
     (turnId + message state), so a single turn is bounded by the VM's 8h lifetime, not
     by Lambda's 15 min.
-11. **Cold start is ~12s wall clock (was 48s), via the image-build hooks + two NFS
-    fixes.** `/ready` gates the snapshot, `/validate` drives page prefetch, `/run`
-    delivers the tenantId. Two traps worth knowing before touching this: the prewarm in
-    `hooks.py` needs Bedrock perms on the **build** role or it samples nothing, and
-    recursive `chown` over NFS costs one round trip per file. Full measurements,
-    rejected approaches, and how to re-measure:
+11. **Cold start is ~66s wall clock (was 48s, then a misleading ~12s), via the image-build
+    hooks + two NFS fixes.** `/ready` gates the snapshot, `/validate` drives page prefetch,
+    `/run` delivers the tenantId. Two traps worth knowing before touching this: the prewarm
+    in `hooks.py` needs Bedrock perms on the **build** role or it samples nothing, and
+    recursive `chown` over NFS costs one round trip per file. The ~12s that used to be
+    claimed here was measured with the gateway still on local disk, because the bounce
+    matched no process. Full measurements, rejected approaches, and how to re-measure:
     [`../docs/perf/cold-start.md`](../docs/perf/cold-start.md).
+12. **The gateway retitles its process to `openclaw-gateway`** (OpenClaw 2026.9+), so
+    `pkill -f 'openclaw.mjs gateway'` silently matches nothing. Both `efs-monitor.sh` and
+    the prewarm use `^(openclaw-gateway|node /app/openclaw.mjs gateway)` — anchored, so the
+    `sh -c` wrapper carrying the pattern cannot match and kill itself.
+13. **Stop the gateway *before* binding the tenant's EFS dir over its state dir, and clear
+    `/tmp/openclaw-state-locks-*` before restarting it.** Swapping the directory under a
+    live gateway makes its shutdown close a SQLite database that just became an NFS file
+    (18.7s instead of 2.2s), and it exits still owning a lock database keyed to the state-db
+    path, so the next start burns ~40s on `gateway already running (pid …)`. `start.sh`
+    holds the gateway down while `/var/run/openclaw-maintenance` exists for exactly this.
+14. **The agent runs as uid 1000 with no capabilities, and cannot reach the EFS mount
+    target.** `start.sh` launches the gateway and its bridge through `setpriv` (empty
+    bounding set, `no_new_privs`); `efs-monitor.sh` adds an `ip rule … uidrange` policy
+    route that `prohibit`s the mount target for that uid, keeps the EFS root and `/tenants`
+    at mode 700, and unmounts the EFS root once the tenant's dir is bound. The guest kernel
+    has **no** iptables `owner` match and no nftables `inet` family, so uid policy routing
+    is the only option — and it is load-bearing: plain NFS trusts the uid a client asserts,
+    so a uid-1000 process that could open port 2049 could read any tenant. Reasoning,
+    probe results and what root-in-VM still defeats:
+    [`../docs/design/nonroot-agent.md`](../docs/design/nonroot-agent.md).
 
 Each of these was hit and fixed during live verification; the reasoning is captured in
 [`../docs/design/`](../docs/design/).
