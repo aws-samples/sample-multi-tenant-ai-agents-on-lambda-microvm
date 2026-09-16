@@ -34,7 +34,10 @@ function* walk(dir) {
     if (e.isDirectory()) {
       if (e.name === "node_modules" || e.name === ".git") continue;
       yield* walk(p);
-    } else if (e.name.endsWith(".js")) {
+    } else if (e.name.endsWith(".js") || e.name.endsWith(".mjs")) {
+      // .mjs matters: the bundle ships the provider as
+      // /app/dist/speech-provider-<hash>.mjs, so a .js-only walk found nothing and this
+      // patch silently did nothing. Scanning both costs ~270ms instead of ~130ms.
       yield p;
     }
   }
@@ -53,7 +56,7 @@ for (const root of ROOTS) {
     candidates++;
     if (src.includes(MARKER)) { alreadyOk++; console.log(`[patch-tts-ja] already patched: ${file}`); continue; }
     if (!TRIGGER.test(src)) {
-      console.log(`[patch-tts-ja] WARNING: trigger not found in ${file} (OpenClaw internals changed?)`);
+      console.error(`[patch-tts-ja] trigger not found in ${file} (OpenClaw internals changed?)`);
       continue;
     }
     writeFileSync(file, src.replace(TRIGGER, REPLACEMENT));
@@ -62,8 +65,17 @@ for (const root of ROOTS) {
   }
 }
 
+// Fail the build rather than warn. This used to print a WARNING and exit 0, so the image
+// kept claiming it teaches the voice picker Japanese long after a base-image change had
+// moved the provider out of reach of the walk. A pinned base image means this can only
+// break when the pin is deliberately moved, which is exactly when a build failure is the
+// signal you want.
 if (candidates === 0) {
-  console.log("[patch-tts-ja] WARNING: no speech-provider file found; skipping");
-} else if (patched === 0 && alreadyOk === 0) {
-  console.log("[patch-tts-ja] WARNING: found provider but no patch applied");
+  console.error("[patch-tts-ja] no speech-provider file found under " + ROOTS.join(", "));
+  process.exit(1);
 }
+if (patched === 0 && alreadyOk === 0) {
+  console.error(`[patch-tts-ja] found ${candidates} provider file(s) but patched none`);
+  process.exit(1);
+}
+console.log(`[patch-tts-ja] done: patched=${patched} alreadyPatched=${alreadyOk} candidates=${candidates}`);
