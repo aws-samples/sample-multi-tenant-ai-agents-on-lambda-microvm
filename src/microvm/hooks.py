@@ -1,6 +1,7 @@
 """Sidecar (multi-tenant EFS variant): lifecycle hooks + health + /tenant + /chat + /tg + /files."""
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -67,7 +68,11 @@ def bridge_connected() -> bool:
 
 
 def write_tenant(raw: str) -> str:
-    tid = "".join(c for c in (raw or "") if c.isalnum() or c in "-_")[:64]
+    # Reject, don't sanitize: str.isalnum() is Unicode-aware, so filtering here and again
+    # with an ASCII-only pass in efs-monitor.sh mapped two different tenant ids onto one
+    # directory — and an all-non-ASCII id onto none at all, which made the tenant dir the
+    # whole /tenants tree. One ASCII grammar, enforced identically on both sides.
+    tid = raw if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", raw or "") else ""
     if tid:
         with open(TENANT_FILE, "w") as f:
             f.write(tid)

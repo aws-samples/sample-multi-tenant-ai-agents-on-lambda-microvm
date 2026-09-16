@@ -75,6 +75,52 @@ Everything the root daemon writes into the tenant dir (`openclaw.json`, the mode
 the healed sessions file) is chowned to uid 1000 afterwards, because the gateway must be
 able to rewrite them.
 
+## The root daemon must not trust the tenant's own directory
+
+Giving the tenant ownership of its state directory creates a hazard that did not exist
+while everything ran as root: the agent can leave things there for the **next generation**,
+where a root daemon reads them. Three concrete paths, all closed:
+
+- **One tenant id grammar, rejected rather than sanitized.** The sidecar used to filter
+  with `str.isalnum()`, which is Unicode-aware, while the shell kept ASCII only. So
+  `victim` plus any non-ASCII character passed the sidecar and became plain `victim` in the
+  shell — one tenant served another's directory — and an id with no ASCII at all became the
+  empty string, which made the tenant directory `/tenants` **itself**: the recursive chown
+  and the bind would then have handed every tenant to the agent at once. Both sides now
+  enforce `^[A-Za-z0-9_-]{1,64}$` and fail closed. Locked by
+  [`../../tests/test_tenant_id_grammar.py`](../../tests/test_tenant_id_grammar.py), which
+  runs the daemon's own `case` pattern against the Python grammar.
+- **No symlink survives into a root write.** A tenant could leave
+  `.models-cache.json -> ../<other>/openclaw.json` and have the root-run model materializer
+  overwrite another tenant's config, or `openclaw.json -> /mnt/efs` and have a plain `chown`
+  hand the mode-700 shared root to uid 1000 (verified in-image: `chown` without `-h` does
+  follow the link; `-h` does not). A state directory seeded from the image contains no
+  symlinks at all, so the daemon deletes every one it finds before touching anything, logs
+  what it removed, and uses `chown -h`. The purge is safe to do once, at that point: the
+  gateway is still running against local state, so nothing can re-create a link before the
+  writes.
+- **`/tenants` stays root-only at mode 700**, which is also what makes the tenant's own
+  directory entry trustworthy — the agent cannot replace it with a symlink, because it
+  cannot write the parent.
+
+## Verified, not assumed
+
+Each step the isolation rests on is checked, and a failure leaves the readiness marker
+unset, which fails the cold start in the orchestrator rather than serving the tenant from
+the wrong directory:
+
+| Step | What would happen if it silently failed | Check |
+|---|---|---|
+| uid policy route installed | EFS mounts with the agent unconfined | every `ip` command's status, then the rule and each prohibit route re-read from the kernel |
+| gateway stopped before the swap | binding over a live writer risks a torn database | `pgrep` after the wait; abort the attempt if it is still alive |
+| tenant directory bound over the state dir | a healthy gateway on **local** state — the tenant's memory silently dies with the VM | both mounts re-read from `/proc/mounts`, including that the source ends in `:/tenants/<this tenant>` and that the plugin bind is `ro` |
+| gateway and bridge back up | first turn lands on a gateway still opening its database | poll both, and if they never come up leave the marker unset |
+
+Aborting undoes only what that pass mounted, innermost first, so the boot-time plugin bind
+underneath survives and the gateway comes back on local state rather than with no plugins.
+Once the mounts verify, readiness is polled separately and adoption is never re-run — that
+would kill a gateway already serving this tenant's EFS-backed state.
+
 ## What it does not cover
 
 - **Root code execution inside the VM is still game over.** A bug in the root sidecar, a
@@ -115,6 +161,15 @@ lines from `/proc/self/status`, `ls /mnt/efs` and `ls /mnt/efs/tenants/<other>`,
 `mount` attempt, a raw TCP connect to the mount target on 2049, and — as the control —
 writing to its own state dir and connecting to the Bedrock endpoint.
 
+The next-generation attack was run end to end as well: one tenant's agent planted
+`openclaw.json -> /mnt/efs` and `.models-cache.json -> ../<other>/openclaw.json` in its own
+EFS directory, then its VM was terminated and cold-started. The daemon logged both links as
+removed, the other tenant's directory was untouched (its model cache kept its original
+timestamp, no foreign files) and that tenant still recalled a memory stored two generations
+earlier. The attacker's own state was re-seeded, because deleting the planted
+`openclaw.json` makes the directory look like a first generation — self-inflicted, and the
+alternative is following the link.
+
 ## Measured
 
 Live on `openclaw-nr`, two tenants, arm64 / 2 GiB. Both isolation and correctness checks
@@ -124,13 +179,24 @@ genuinely runs on EFS-backed state — see the correction in
 
 | | first cut | after stopping the gateway *before* the swap |
 |---|---|---|
-| Cold start, wall clock to a reply | 109s | **66s, 82s** |
-| ↳ VM-internal `RUNNING` → `efsReady` | 105.8s | **47.9s, 47.5s** |
-| ↳↳ gateway stop | 18.7s | **2.2s** |
+| Cold start, wall clock to a reply | 109s | **66s, 70s, 82s** |
+| ↳ VM-internal `RUNNING` → `efsReady` | 105.8s | **47.5s, 47.9s, 50.0s, 55.3s** |
+| ↳↳ gateway stop | 18.7s | **0.5s, 1.1s, 2.2s** |
 | ↳↳ gateway start | 61.7s, 65.5s | **41.7s** |
 | Warm turn | 14.8–23.9s | **12.7s** |
 | First-generation seed: `chown -R` over NFS | 5.8s, 6.0s | unchanged |
 | Adopted generation: ownership probe | 8–11ms (sentinel) | unchanged |
+| Adopted generation: symlink purge walk | — | **141ms, 568ms** |
+
+The postcondition checks cost nothing measurable; the symlink purge adds one walk of the
+tenant tree, which is only cheap because the ~10k-file plugin tree lives in the image.
+
+One outlier worth knowing: a cold start that re-seeds — first generation, or a generation
+whose planted `openclaw.json` was purged — took **152.7s**, with 124s of that in the gateway
+start and 90s of it before OpenClaw printed its first line. The `tar` seed writes tens of MB
+through the page cache, which evicts the node bundle, and the restart then re-pays the
+demand paging that [../perf/cold-start.md](../perf/cold-start.md#cause-1--demand-paged-disk-48s--32s)
+describes. Steady-state generations do not tar and do not pay it.
 
 Two findings worth keeping:
 

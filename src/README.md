@@ -206,6 +206,16 @@ DDB, Lambda, API), and finally empties & drops the artifact bucket.
     so a uid-1000 process that could open port 2049 could read any tenant. Reasoning,
     probe results and what root-in-VM still defeats:
     [`../docs/design/nonroot-agent.md`](../docs/design/nonroot-agent.md).
+15. **Once the tenant owns its state dir, the root daemon must not trust it.** The tenant id
+    is validated against `^[A-Za-z0-9_-]{1,64}$` on both sides and rejected, not sanitized —
+    two different filters meant `victim<non-ascii>` collapsed onto tenant `victim`, and an
+    id with no ASCII at all onto the whole `/tenants` tree. Every symlink in the tenant
+    directory is deleted before root touches it, because a link left for the next generation
+    redirects the config copy or the model materializer, and a plain `chown` through one
+    hands the mode-700 EFS root to uid 1000. Route installation, the gateway stop, both bind
+    mounts (re-read from `/proc/mounts`) and gateway readiness are all verified; any failure
+    leaves `/var/run/efs-mounted` unset, which fails the cold start in the orchestrator
+    instead of serving a tenant from local state that dies with the VM.
 
 Each of these was hit and fixed during live verification; the reasoning is captured in
 [`../docs/design/`](../docs/design/).
