@@ -140,7 +140,11 @@ is not here. Read this section before deploying anything you care about.
   hook, and OpenClaw's gateway stays loopback-only inside the VM — the orchestrator
   reaches it only through a MicroVM auth token that is minted per turn, expires in ≤55
   minutes, and is scoped to the single sidecar port.
-- Per-tenant state confined to its own subdirectory on an encrypted EFS filesystem.
+- Per-tenant state confined to its own subdirectory on an encrypted EFS filesystem. The
+  agent cannot leave that subdirectory: it runs as an unprivileged uid with an empty
+  capability set, only its own tenant directory is mounted, and a uid policy route stops it
+  from reaching the EFS mount target directly. What that does and does not withstand is in
+  [`docs/design/nonroot-agent.md`](docs/design/nonroot-agent.md).
 - Bedrock reached over VPC endpoints; separate IAM roles for image build, VM runtime, and
   the orchestrator.
 - Exactly two public routes: `/tg/<tenantId>`, which requires that tenant's webhook secret
@@ -178,9 +182,17 @@ is not here. Read this section before deploying anything you care about.
 - **Availability and durability.** Single region, single AZ, one EFS mount target, no EFS
   backup policy, no DynamoDB point-in-time recovery. The registry is the only record of
   which VM and which state directory belong to which tenant.
-- **Storage hardening.** EFS Access Point with a non-root POSIX identity and single-writer
-  enforcement per tenant state directory — written up in
+- **Storage hardening.** The per-tenant confinement here is enforced *inside* the VM, so
+  root code execution in a VM — a bug in the root sidecar, a kernel escalation — still sees
+  every tenant's directory. Enforcing it on the EFS side instead (one Access Point plus one
+  IAM role per tenant) is what survives that; it costs ~20s more per cold start. Both are
+  written up in [`docs/design/nonroot-agent.md`](docs/design/nonroot-agent.md) and
   [`docs/design/storage-options.md`](docs/design/storage-options.md).
+- **Per-turn latency with state on EFS.** A warm turn costs ~13s, against ~2s with the state
+  directory on local disk, because OpenClaw keeps sessions in a single SQLite database and
+  that database is on NFS. Cold start is ~66s, ~42s of which is one gateway boot against
+  that database. Unresolved — see
+  [`docs/perf/cold-start.md`](docs/perf/cold-start.md#correction-the-12s-figure-was-never-efs-backed).
 
 None of the above is a defect report; it is the edge of this sample's scope, stated so you
 can see where your work starts. If you do find something that breaks the isolation the sample

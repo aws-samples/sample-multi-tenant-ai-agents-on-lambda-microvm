@@ -1,4 +1,10 @@
-# Cold-Start Optimization — 48s → ~12s
+# Cold-Start Optimization — 48s → ~12s, then 66s
+
+> [!WARNING]
+> The ~12s result below was measured with the gateway still running on **local disk** — the
+> bounce that was supposed to move it onto EFS silently matched no process. See
+> [Correction](#correction-the-12s-figure-was-never-efs-backed) before quoting any number
+> from this document.
 
 > Measured on a live stack (`openclaw-mt`, us-east-1, arm64, 2 GiB) over 2026-07-25,
 > tenant `captain` with pre-existing EFS state. Every number below comes from a real
@@ -102,6 +108,27 @@ But the Bedrock catalog changes on the order of weeks, while this ran on every c
 It now caches per tenant on EFS (`.models-cache.json`) with a 24h TTL. Stale, empty,
 corrupt, and future-dated cache files all degrade to live discovery — verified by unit
 test, since a bad cache would silently pin a stale model list.
+
+## Correction — the 12s figure was never EFS-backed
+
+Everything above is real, but it measured the wrong thing. `efs-monitor` ended its adoption
+flow with `pkill -f "openclaw.mjs gateway"`, and the gateway **retitles its own process** to
+`openclaw-gateway`, so that pattern matched nothing from OpenClaw 2026.9 onward. The gateway
+kept serving from the local-disk state directory it booted with; the bind mount was in place,
+but nothing was using it. The 11–13s cold start and the 60–96ms acks are the numbers for an
+agent running on local disk.
+
+With the pattern anchored so it actually matches, a cold start on this same code is **66–82s
+wall clock**, of which one OpenClaw boot against EFS-backed state is ~42s (its own log says
+`slow OpenClaw agent database open`). A warm turn is ~13s rather than ~2s. The session store
+is a single SQLite database, and putting it on NFS is what costs the difference.
+
+Measurements, the ordering trap that doubles it, and what this rules out are in
+[../design/nonroot-agent.md](../design/nonroot-agent.md#measured). Two consequences for the
+sections above: the "Investigated and rejected — the gateway bounce" argument below rests on
+logs from a bounce that never happened, and the storage decision in
+[../design/storage-options.md](../design/storage-options.md) was taken on the assumption that
+sessions are append-only `.jsonl` files, which they no longer are.
 
 ## Investigated and rejected — the gateway bounce
 
